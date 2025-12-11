@@ -43,6 +43,7 @@ def create_app(config_class=Config):
     from app.routes.grn_routes import grn_bp
     from app.routes.stocksold_routes import stock_sold_bp
     from app.routes.mrpchange_routes import mrp_bp
+    from app.routes.quotation_routes import quotation_bp
 
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -67,6 +68,7 @@ def create_app(config_class=Config):
     app.register_blueprint(grn_bp,url_prefix="/api/grn/")
     app.register_blueprint(stock_sold_bp)
     app.register_blueprint(mrp_bp)
+    app.register_blueprint(quotation_bp)
 
 
 

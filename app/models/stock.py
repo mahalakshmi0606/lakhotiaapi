@@ -2,7 +2,7 @@ from app import db
 from datetime import datetime
 
 class Stock(db.Model):
-    __tablename__ = "stock"
+    __tablename__ = "stocks"
 
     id = db.Column(db.Integer, primary_key=True)
 
