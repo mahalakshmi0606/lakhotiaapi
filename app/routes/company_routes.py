@@ -22,7 +22,9 @@ def add_company():
             customer_email=data.get("customerEmail"),
             department=data.get("department"),
             personal_mobile=data.get("personalMobile"),
-            personal_email=data.get("personalEmail")
+            personal_email=data.get("personalEmail"),
+            # ✅ NEW FIELD
+            gst_number=data.get("gstNumber")
         )
 
         db.session.add(new_company)
@@ -63,7 +65,6 @@ def get_company(id):
 # ======================================================
 @company_bp.route("/company/mobile/<string:mobile>", methods=["GET"])
 def get_company_by_mobile(mobile):
-
     # Ensure clean 10-digit mobile (optional but safer)
     mobile = ''.join(filter(str.isdigit, mobile))[-10:]
 
@@ -74,7 +75,8 @@ def get_company_by_mobile(mobile):
 
     return jsonify({
         "company_name": company.company_name,
-        "customer_name": company.customer_name
+        "customer_name": company.customer_name,
+        "gst_number": company.gst_number  # ✅ NEW FIELD
     }), 200
 
 
@@ -116,6 +118,8 @@ def update_company(id):
         company.department = data.get("department")
         company.personal_mobile = data.get("personalMobile")
         company.personal_email = data.get("personalEmail")
+        # ✅ NEW FIELD
+        company.gst_number = data.get("gstNumber")
 
         db.session.commit()
 

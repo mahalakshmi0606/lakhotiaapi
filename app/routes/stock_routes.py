@@ -2,9 +2,155 @@ from flask import Blueprint, request, jsonify
 from app import db
 from app.models.stock import Stock
 from flask_cors import CORS
+from sqlalchemy import or_
 
 stock_bp = Blueprint("stock_bp", __name__, url_prefix="/api/stock")
 CORS(stock_bp)
+
+# -------------------------------------------------------
+# SEARCH STOCK (BY BRAND CODE, ITEM NAME, BRAND, HSN, ETC.)
+# -------------------------------------------------------
+@stock_bp.route("/search", methods=["GET"])
+def search_stock():
+    try:
+        search_term = request.args.get("q", "").strip()
+        
+        if not search_term:
+            return jsonify({"success": False, "message": "Search term required"}), 400
+        
+        # Search in multiple fields
+        search_query = Stock.query.filter(
+            or_(
+                Stock.brand_code.ilike(f"%{search_term}%"),
+                Stock.item_name.ilike(f"%{search_term}%"),
+                Stock.brand.ilike(f"%{search_term}%"),
+                Stock.hsn.ilike(f"%{search_term}%"),
+                Stock.brand_description.ilike(f"%{search_term}%"),
+                Stock.batch_code.ilike(f"%{search_term}%")
+            )
+        ).order_by(Stock.brand_code)
+        
+        items = search_query.limit(50).all()  # Limit to 50 results
+        
+        output = []
+        for s in items:
+            output.append({
+                "id": s.id,
+                "Item Name": s.item_name,
+                "Brand": s.brand,
+                "Brand Code": s.brand_code,
+                "Brand Description": s.brand_description,
+                "HSN": s.hsn,
+                "Batch Code": s.batch_code,
+                "MRP": s.mrp,
+                "Buy Price": s.buy_price,
+                "Width": s.width,
+                "Length": s.length,
+                "Unit": s.unit,
+                "GST": s.gst,
+                "created_at": s.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            })
+        
+        return jsonify({
+            "success": True, 
+            "data": output,
+            "count": len(output)
+        }), 200
+        
+    except Exception as e:
+        print("Search Error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+
+
+# -------------------------------------------------------
+# GET BUY PRICE BY BRAND CODE (SPECIFIC ENDPOINT)
+# -------------------------------------------------------
+@stock_bp.route("/buy-price/<string:brand_code>", methods=["GET"])
+def get_buy_price(brand_code):
+    try:
+        if not brand_code or brand_code.strip() == "":
+            return jsonify({"success": False, "message": "Brand Code required"}), 400
+        
+        stock = Stock.query.filter_by(brand_code=brand_code.strip()).first()
+        
+        if not stock:
+            return jsonify({
+                "success": False, 
+                "message": f"Stock item with Brand Code '{brand_code}' not found"
+            }), 404
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "brand_code": stock.brand_code,
+                "item_name": stock.item_name,
+                "buy_price": stock.buy_price,
+                "mrp": stock.mrp,
+                "brand": stock.brand,
+                "hsn": stock.hsn,
+                "unit": stock.unit
+            }
+        }), 200
+        
+    except Exception as e:
+        print("Get Buy Price Error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+
+
+# -------------------------------------------------------
+# GET MULTIPLE BUY PRICES (BULK LOOKUP)
+# -------------------------------------------------------
+@stock_bp.route("/bulk-buy-prices", methods=["POST"])
+def get_bulk_buy_prices():
+    try:
+        data = request.get_json()
+        brand_codes = data.get("brand_codes", [])
+        
+        if not brand_codes:
+            return jsonify({"success": False, "message": "Brand codes list required"}), 400
+        
+        # Remove duplicates and empty strings
+        unique_codes = list(set([code.strip() for code in brand_codes if code and str(code).strip()]))
+        
+        if not unique_codes:
+            return jsonify({"success": False, "message": "No valid brand codes provided"}), 400
+        
+        # Query for all brand codes at once
+        stocks = Stock.query.filter(Stock.brand_code.in_(unique_codes)).all()
+        
+        # Create a map for quick lookup
+        stock_map = {stock.brand_code: stock for stock in stocks}
+        
+        results = []
+        not_found = []
+        
+        for code in unique_codes:
+            stock = stock_map.get(code)
+            if stock:
+                results.append({
+                    "brand_code": code,
+                    "item_name": stock.item_name,
+                    "buy_price": stock.buy_price,
+                    "mrp": stock.mrp,
+                    "brand": stock.brand,
+                    "hsn": stock.hsn,
+                    "unit": stock.unit
+                })
+            else:
+                not_found.append(code)
+        
+        return jsonify({
+            "success": True,
+            "data": results,
+            "not_found": not_found,
+            "found_count": len(results),
+            "not_found_count": len(not_found)
+        }), 200
+        
+    except Exception as e:
+        print("Bulk Buy Prices Error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+
 
 # -------------------------------------------------------
 # BULK SAVE (INSERT NEW RECORDS)

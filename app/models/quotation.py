@@ -1,4 +1,3 @@
-# backend/models/quotation.py
 from app import db
 from datetime import datetime
 
@@ -39,6 +38,16 @@ class Quotation(db.Model):
     status = db.Column(db.String(20), default='draft')
     review_status = db.Column(db.String(20), default='pending')
 
+    # Sales Order Tracking (NEW)
+    sales_order_number = db.Column(db.String(50), nullable=True, unique=True)
+    sales_order_date = db.Column(db.DateTime, nullable=True)
+    sales_order_status = db.Column(db.String(20), default='not_created')
+    # Sales Order Status Values: 'not_created', 'draft', 'confirmed', 'in_production', 
+    # 'ready_for_dispatch', 'dispatched', 'delivered', 'cancelled'
+    
+    # Sales Order Remarks
+    sales_order_remark = db.Column(db.Text, nullable=True)
+    
     # User Tracking
     created_by = db.Column(db.String(100))
     updated_by = db.Column(db.String(100))
@@ -88,6 +97,11 @@ class Quotation(db.Model):
             'requote_date': self.requote_date.isoformat() if self.requote_date else None,
             'status': self.status,
             'review_status': self.review_status,
+            # Sales Order Fields (NEW)
+            'sales_order_number': self.sales_order_number,
+            'sales_order_date': self.sales_order_date.isoformat() if self.sales_order_date else None,
+            'sales_order_status': self.sales_order_status,
+            'sales_order_remark': self.sales_order_remark,
             'created_by': self.created_by,
             'updated_by': self.updated_by,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -134,6 +148,19 @@ class QuotationItem(db.Model):
     item_status = db.Column(db.String(20), default='pending')
     review_status = db.Column(db.String(20), default='pending')
 
+    # NEW: Sales order tracking
+    sales_order_created = db.Column(db.Boolean, default=False)
+    sales_order_remark = db.Column(db.Text)
+    sales_order_date = db.Column(db.DateTime, nullable=True)
+    
+    # NEW: Item-level sales order status
+    sales_order_item_status = db.Column(db.String(20), default='not_created')
+    # Sales Order Item Status Values: 'not_created', 'ordered', 'in_production', 
+    # 'ready', 'dispatched', 'delivered', 'rejected'
+    
+    # NEW: Rejection reason
+    rejection_reason = db.Column(db.Text)
+    
     updated_by = db.Column(db.String(100))
 
     # Calculated Fields
@@ -163,6 +190,11 @@ class QuotationItem(db.Model):
             'tax_rate': float(self.tax_rate),
             'item_status': self.item_status,
             'review_status': self.review_status,
+            'sales_order_created': self.sales_order_created,
+            'sales_order_remark': self.sales_order_remark,
+            'sales_order_date': self.sales_order_date.isoformat() if self.sales_order_date else None,
+            'sales_order_item_status': self.sales_order_item_status,
+            'rejection_reason': self.rejection_reason,
             'updated_by': self.updated_by,
             'price_per_unit': float(self.price_per_unit),
             'amount_before_discount': float(self.amount_before_discount),

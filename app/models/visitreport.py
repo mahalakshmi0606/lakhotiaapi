@@ -32,5 +32,5 @@ class VisitReport(db.Model):
             "notes": self.notes,
             "attachment": self.attachment,
             "created_by": self.created_by,
-            "created_at": self.created_at.strftime("%d-%m-%Y %I:%M %p"),
+             "created_at": self.created_at.isoformat() if self.created_at else None,  # ✅ ISO format
         }

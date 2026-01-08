@@ -44,6 +44,7 @@ def create_app(config_class=Config):
     from app.routes.stocksold_routes import stock_sold_bp
     from app.routes.mrpchange_routes import mrp_bp
     from app.routes.quotation_routes import quotation_bp
+    from app.routes.purchaseorder_routes import purchase_order_bp
 
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
@@ -69,6 +70,8 @@ def create_app(config_class=Config):
     app.register_blueprint(stock_sold_bp)
     app.register_blueprint(mrp_bp)
     app.register_blueprint(quotation_bp)
+    app.register_blueprint(purchase_order_bp, url_prefix="/api/purchase-orders")
+
 
 
 

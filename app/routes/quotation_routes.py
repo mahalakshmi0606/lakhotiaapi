@@ -1,10 +1,9 @@
-# backend/routes/quotation.py
 from flask import Blueprint, request, jsonify
 from datetime import datetime
 import uuid
 from app.models.quotation import Quotation, QuotationItem
 from app import db
-from sqlalchemy import func, extract
+from sqlalchemy import func, extract, or_
 
 quotation_bp = Blueprint('quotations', __name__)
 
@@ -13,6 +12,12 @@ def generate_quote_number():
     date_str = datetime.now().strftime("%Y%m%d")
     random_num = str(uuid.uuid4().int)[:6]
     return f"Q-{date_str}-{random_num}"
+
+# Generate unique sales order number
+def generate_sales_order_number():
+    date_str = datetime.now().strftime("%Y%m%d")
+    random_num = str(uuid.uuid4().int)[:6]
+    return f"SO-{date_str}-{random_num}"
 
 # Helper function to generate requote number
 def generate_requote_number(original_quote_number):
@@ -33,6 +38,7 @@ def generate_requote_number(original_quote_number):
 def get_quotations():
     try:
         status = request.args.get('status')
+        sales_order_status = request.args.get('sales_order_status')
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 20))
         
@@ -40,6 +46,9 @@ def get_quotations():
         
         if status:
             query = query.filter_by(status=status)
+        
+        if sales_order_status:
+            query = query.filter_by(sales_order_status=sales_order_status)
         
         quotations = query.order_by(Quotation.created_at.desc())\
                          .paginate(page=page, per_page=per_page, error_out=False)
@@ -108,6 +117,11 @@ def create_quotation():
             requote_date=datetime.now() if original_quote_id else None,
             status=data.get('status', 'draft'),
             review_status=data.get('review_status', 'pending'),
+            # Sales Order Fields (NEW)
+            sales_order_number=data.get('sales_order_number'),
+            sales_order_date=datetime.fromisoformat(data['sales_order_date']) if data.get('sales_order_date') else None,
+            sales_order_status=data.get('sales_order_status', 'not_created'),
+            sales_order_remark=data.get('sales_order_remark', ''),
             created_by=data.get('created_by'),
             updated_by=data.get('updated_by'),
             created_at=datetime.now(),
@@ -137,6 +151,10 @@ def create_quotation():
                 tax_rate=item_data.get('tax_rate', 18),
                 item_status=item_data.get('item_status', 'pending'),
                 review_status=item_data.get('review_status', 'pending'),
+                sales_order_created=item_data.get('sales_order_created', False),
+                sales_order_remark=item_data.get('sales_order_remark', ''),
+                sales_order_item_status=item_data.get('sales_order_item_status', 'not_created'),
+                rejection_reason=item_data.get('rejection_reason', ''),
                 updated_by=data.get('updated_by'),
                 price_per_unit=item_data.get('price_per_unit', 0),
                 amount_before_discount=item_data.get('amount_before_discount', 0),
@@ -166,11 +184,11 @@ def update_quotation(quote_id):
         quotation = Quotation.query.get_or_404(quote_id)
         data = request.get_json()
         
-        # Check if quotation is completed (read-only)
-        if quotation.status.lower() == 'completed':
+        # Allow updates to completed quotations for item status updates
+        if quotation.status.lower() == 'completed' and 'status' in data and data['status'] != 'completed':
             return jsonify({
                 'success': False, 
-                'message': 'Cannot update a completed quotation'
+                'message': 'Cannot change status of a completed quotation'
             }), 400
         
         # Update quotation fields
@@ -178,12 +196,18 @@ def update_quotation(quote_id):
             'company_name', 'company_address', 'company_gstin', 
             'contact_person', 'contact_mobile', 'contact_email',
             'subtotal', 'total_discount', 'total_tax', 'grand_total',
-            'notes', 'status', 'review_status', 'updated_by'
+            'notes', 'status', 'review_status', 'updated_by',
+            # Sales Order Fields (NEW)
+            'sales_order_number', 'sales_order_status', 'sales_order_remark'
         ]
         
         for field in update_fields:
             if field in data:
                 setattr(quotation, field, data[field])
+        
+        # Handle sales order date
+        if 'sales_order_date' in data and data['sales_order_date']:
+            quotation.sales_order_date = datetime.fromisoformat(data['sales_order_date'])
         
         # Handle re-quote specific fields
         if 'requote_note' in data:
@@ -215,8 +239,9 @@ def update_quotation(quote_id):
                             'item_name', 'hsn_sac', 'supplier_part_no', 'description',
                             'cut_width', 'length', 'batch_no', 'mrp', 'quantity', 'unit',
                             'discount', 'discount_type', 'tax_rate', 'item_status',
-                            'review_status', 'updated_by', 'price_per_unit',
-                            'amount_before_discount', 'discount_amount',
+                            'review_status', 'sales_order_created', 'sales_order_remark',
+                            'sales_order_item_status', 'rejection_reason', 'updated_by', 
+                            'price_per_unit', 'amount_before_discount', 'discount_amount',
                             'amount_after_discount', 'tax_amount', 'item_total'
                         ]
                         for field in update_item_fields:
@@ -241,6 +266,10 @@ def update_quotation(quote_id):
                         tax_rate=item_data.get('tax_rate', 18),
                         item_status=item_data.get('item_status', 'pending'),
                         review_status=item_data.get('review_status', 'pending'),
+                        sales_order_created=item_data.get('sales_order_created', False),
+                        sales_order_remark=item_data.get('sales_order_remark', ''),
+                        sales_order_item_status=item_data.get('sales_order_item_status', 'not_created'),
+                        rejection_reason=item_data.get('rejection_reason', ''),
                         updated_by=data.get('updated_by', quotation.updated_by),
                         price_per_unit=item_data.get('price_per_unit', 0),
                         amount_before_discount=item_data.get('amount_before_discount', 0),
@@ -336,23 +365,62 @@ def update_quotation_status(quote_id):
         db.session.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
 
+# NEW: Update quotation sales order status
+@quotation_bp.route('/api/quotations/<int:quote_id>/sales-order-status', methods=['PATCH'])
+def update_sales_order_status(quote_id):
+    try:
+        quotation = Quotation.query.get_or_404(quote_id)
+        data = request.get_json()
+        
+        new_status = data.get('sales_order_status')
+        valid_statuses = ['not_created', 'draft', 'confirmed', 'in_production', 
+                         'ready_for_dispatch', 'dispatched', 'delivered', 'cancelled']
+        
+        if new_status not in valid_statuses:
+            return jsonify({'success': False, 'message': 'Invalid sales order status'}), 400
+        
+        # Update sales order status
+        quotation.sales_order_status = new_status
+        
+        # Generate sales order number if not already present and status is not 'not_created'
+        if new_status != 'not_created' and not quotation.sales_order_number:
+            quotation.sales_order_number = generate_sales_order_number()
+        
+        # Set sales order date if not already set and status is confirmed or beyond
+        if new_status in ['confirmed', 'in_production', 'ready_for_dispatch', 'dispatched', 'delivered']:
+            if not quotation.sales_order_date:
+                quotation.sales_order_date = datetime.now()
+        
+        # Update sales order remark if provided
+        if 'sales_order_remark' in data:
+            quotation.sales_order_remark = data['sales_order_remark']
+        
+        quotation.updated_at = datetime.now()
+        quotation.updated_by = data.get('updated_by', quotation.updated_by)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Sales order status updated to {new_status}',
+            'data': quotation.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 # Update item status in quotation
-@quotation_bp.route('/api/quotations/<int:quote_id>/items/<int:item_id>/status', methods=['PATCH'])
+@quotation_bp.route('/api/quotations/<int:quote_id>/items/<int:item_id>/status', methods=['PATCH', 'PUT'])
 def update_item_status(quote_id, item_id):
     try:
         quotation = Quotation.query.get_or_404(quote_id)
         
-        # Check if quotation is completed
-        if quotation.status.lower() == 'completed':
-            return jsonify({
-                'success': False, 
-                'message': 'Cannot update items in a completed quotation'
-            }), 400
-        
         data = request.get_json()
         
-        new_status = data.get('status')
-        valid_statuses = ['pending', 'approved', 'rejected', 'dispatched', 'delivered']
+        new_status = data.get('status') or data.get('item_status')
+        # Accept both old and new status values
+        valid_statuses = ['pending', 'approved', 'rejected', 'ordered', 'dispatched', 'delivered', 'accepted']
         
         if new_status not in valid_statuses:
             return jsonify({'success': False, 'message': 'Invalid item status'}), 400
@@ -364,6 +432,29 @@ def update_item_status(quote_id, item_id):
         
         item.item_status = new_status
         item.updated_by = data.get('updated_by', item.updated_by)
+        item.updated_at = datetime.now()
+        
+        # Handle sales order creation
+        if 'sales_order_created' in data:
+            item.sales_order_created = data['sales_order_created']
+            if data.get('sales_order_created'):
+                item.sales_order_date = datetime.now()
+                item.sales_order_remark = data.get('sales_order_remark', 'Sales order created')
+                # Auto-set sales order item status to 'ordered' when sales order is created
+                item.sales_order_item_status = 'ordered'
+            else:
+                item.sales_order_date = None
+                item.sales_order_remark = ''
+                item.sales_order_item_status = 'not_created'
+        
+        # Handle sales order item status
+        if 'sales_order_item_status' in data:
+            item.sales_order_item_status = data['sales_order_item_status']
+        
+        # Handle rejection reason
+        if 'rejection_reason' in data:
+            item.rejection_reason = data['rejection_reason']
+        
         quotation.updated_at = datetime.now()
         
         db.session.commit()
@@ -378,17 +469,243 @@ def update_item_status(quote_id, item_id):
         db.session.rollback()
         return jsonify({'success': False, 'message': str(e)}), 500
 
+# Mark item as sales order created
+@quotation_bp.route('/api/quotations/items/<int:item_id>/mark-sales-order', methods=['PATCH'])
+def mark_sales_order_created(item_id):
+    try:
+        data = request.get_json()
+        
+        # Find the item
+        item = QuotationItem.query.get(item_id)
+        if not item:
+            return jsonify({'success': False, 'message': 'Item not found'}), 404
+        
+        # Update sales order fields
+        item.sales_order_created = True
+        item.sales_order_date = datetime.now()
+        item.sales_order_remark = data.get('remark', 'Sales order created')
+        item.sales_order_item_status = 'ordered'
+        item.item_status = 'ordered'  # Update status to ordered
+        item.updated_by = data.get('updated_by', 'system')
+        item.updated_at = datetime.now()
+        
+        # Update quotation sales order status if not already set
+        quotation = Quotation.query.get(item.quotation_id)
+        if quotation:
+            quotation.updated_at = datetime.now()
+            # If quotation sales order status is 'not_created', update it
+            if quotation.sales_order_status == 'not_created':
+                quotation.sales_order_status = 'draft'
+                if not quotation.sales_order_number:
+                    quotation.sales_order_number = generate_sales_order_number()
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Item marked as sales order created',
+            'data': item.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# Update item sales order status
+@quotation_bp.route('/api/quotations/items/<int:item_id>/sales-order-status', methods=['PATCH'])
+def update_item_sales_order_status(item_id):
+    try:
+        data = request.get_json()
+        
+        # Find the item
+        item = QuotationItem.query.get(item_id)
+        if not item:
+            return jsonify({'success': False, 'message': 'Item not found'}), 404
+        
+        new_status = data.get('sales_order_item_status')
+        valid_statuses = ['not_created', 'ordered', 'in_production', 'ready', 'dispatched', 'delivered', 'rejected']
+        
+        if new_status not in valid_statuses:
+            return jsonify({'success': False, 'message': 'Invalid sales order item status'}), 400
+        
+        # Update sales order item status
+        item.sales_order_item_status = new_status
+        
+        # Auto-update item_status based on sales order item status
+        status_mapping = {
+            'ordered': 'ordered',
+            'in_production': 'ordered',
+            'ready': 'dispatched',
+            'dispatched': 'dispatched',
+            'delivered': 'delivered',
+            'rejected': 'rejected'
+        }
+        
+        if new_status in status_mapping:
+            item.item_status = status_mapping[new_status]
+        
+        # Set sales order created to True if status is beyond 'not_created'
+        if new_status != 'not_created' and not item.sales_order_created:
+            item.sales_order_created = True
+            item.sales_order_date = datetime.now()
+        
+        item.updated_by = data.get('updated_by', 'system')
+        item.updated_at = datetime.now()
+        
+        # Update quotation
+        quotation = Quotation.query.get(item.quotation_id)
+        if quotation:
+            quotation.updated_at = datetime.now()
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Item sales order status updated to {new_status}',
+            'data': item.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# Update rejection reason for item
+@quotation_bp.route('/api/quotations/items/<int:item_id>/rejection-reason', methods=['PATCH'])
+def update_rejection_reason(item_id):
+    try:
+        data = request.get_json()
+        
+        # Find the item
+        item = QuotationItem.query.get(item_id)
+        if not item:
+            return jsonify({'success': False, 'message': 'Item not found'}), 404
+        
+        rejection_reason = data.get('rejection_reason', '').strip()
+        
+        # Update rejection reason
+        item.rejection_reason = rejection_reason
+        
+        # If rejection reason is provided, automatically set status to rejected
+        if rejection_reason:
+            item.item_status = 'rejected'
+            item.sales_order_item_status = 'rejected'
+        
+        item.updated_by = data.get('updated_by', 'system')
+        item.updated_at = datetime.now()
+        
+        # Update quotation timestamp
+        quotation = Quotation.query.get(item.quotation_id)
+        if quotation:
+            quotation.updated_at = datetime.now()
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Rejection reason updated',
+            'data': item.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# NEW: Bulk update item statuses for completed quotations
+@quotation_bp.route('/api/quotations/<int:quote_id>/items/status', methods=['PUT'])
+def update_items_status(quote_id):
+    try:
+        quotation = Quotation.query.get_or_404(quote_id)
+        data = request.get_json()
+        
+        # Check if quotation is completed
+        if quotation.status.lower() != 'completed':
+            return jsonify({
+                'success': False, 
+                'message': 'Can only update item statuses for completed quotations'
+            }), 400
+        
+        item_updates = data.get('item_updates', [])
+        if not item_updates:
+            return jsonify({'success': False, 'message': 'No item updates provided'}), 400
+        
+        updated_count = 0
+        for update in item_updates:
+            item_id = update.get('id')
+            new_status = update.get('item_status')
+            
+            if not item_id or not new_status:
+                continue
+            
+            # Accept both old and new status values
+            valid_statuses = ['pending', 'approved', 'rejected', 'ordered', 'dispatched', 'delivered', 'accepted']
+            if new_status not in valid_statuses:
+                continue
+            
+            # Find and update the specific item
+            item = QuotationItem.query.filter_by(id=item_id, quotation_id=quote_id).first()
+            if item:
+                item.item_status = new_status
+                item.updated_by = data.get('updated_by', 'system')
+                item.updated_at = datetime.now()
+                
+                # Handle rejection reason
+                if 'rejection_reason' in update:
+                    item.rejection_reason = update['rejection_reason']
+                
+                # Handle sales order item status
+                if 'sales_order_item_status' in update:
+                    item.sales_order_item_status = update['sales_order_item_status']
+                
+                updated_count += 1
+        
+        quotation.updated_at = datetime.now()
+        quotation.updated_by = data.get('updated_by', 'system')
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Updated {updated_count} item(s)',
+            'data': {
+                'updated_count': updated_count,
+                'quotation_id': quote_id,
+                'quote_number': quotation.quote_number
+            }
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 # Get item status statistics for a quotation
 @quotation_bp.route('/api/quotations/<int:quote_id>/item-statistics', methods=['GET'])
 def get_item_statistics(quote_id):
     try:
         quotation = Quotation.query.get_or_404(quote_id)
         
-        # Count items by status
+        # Count items by status (include both old and new status values)
         status_counts = {}
-        for status in ['pending', 'approved', 'rejected', 'dispatched', 'delivered']:
+        all_statuses = ['pending', 'approved', 'rejected', 'ordered', 'dispatched', 'delivered', 'accepted']
+        
+        for status in all_statuses:
             count = QuotationItem.query.filter_by(quotation_id=quote_id, item_status=status).count()
-            status_counts[status] = count
+            if count > 0:
+                status_counts[status] = count
+        
+        # Count sales orders
+        sales_order_count = QuotationItem.query.filter_by(
+            quotation_id=quote_id, 
+            sales_order_created=True
+        ).count()
+        
+        # Count by sales order item status (NEW)
+        sales_order_status_counts = {}
+        all_sales_order_statuses = ['not_created', 'ordered', 'in_production', 'ready', 'dispatched', 'delivered', 'rejected']
+        
+        for status in all_sales_order_statuses:
+            count = QuotationItem.query.filter_by(quotation_id=quote_id, sales_order_item_status=status).count()
+            if count > 0:
+                sales_order_status_counts[status] = count
         
         return jsonify({
             'success': True,
@@ -396,7 +713,9 @@ def get_item_statistics(quote_id):
                 'quotation_id': quote_id,
                 'quote_number': quotation.quote_number,
                 'total_items': len(quotation.items),
-                'status_counts': status_counts
+                'status_counts': status_counts,
+                'sales_order_count': sales_order_count,
+                'sales_order_status_counts': sales_order_status_counts
             }
         }), 200
         
@@ -437,6 +756,14 @@ def get_statistics():
             count = Quotation.query.filter_by(status=status).count()
             status_counts[status] = count
         
+        # Count by sales order status (NEW)
+        sales_order_status_counts = {}
+        valid_sales_order_statuses = ['not_created', 'draft', 'confirmed', 'in_production', 
+                                     'ready_for_dispatch', 'dispatched', 'delivered', 'cancelled']
+        for status in valid_sales_order_statuses:
+            count = Quotation.query.filter_by(sales_order_status=status).count()
+            sales_order_status_counts[status] = count
+        
         # Monthly totals for current year
         monthly_totals = db.session.query(
             extract('month', Quotation.created_at).label('month'),
@@ -457,28 +784,76 @@ def get_statistics():
                 current_month_revenue = float(total or 0)
                 break
         
-        # Get all item status counts
+        # Get all item status counts (include all status values)
         item_status_counts = {}
-        for status in ['pending', 'approved', 'rejected', 'dispatched', 'delivered']:
+        all_item_statuses = ['pending', 'approved', 'rejected', 'ordered', 'dispatched', 'delivered', 'accepted']
+        for status in all_item_statuses:
             count = QuotationItem.query.filter_by(item_status=status).count()
-            item_status_counts[status] = count
+            if count > 0:
+                item_status_counts[status] = count
+        
+        # Get sales order item status counts (NEW)
+        sales_order_item_status_counts = {}
+        all_sales_order_item_statuses = ['not_created', 'ordered', 'in_production', 'ready', 'dispatched', 'delivered', 'rejected']
+        for status in all_sales_order_item_statuses:
+            count = QuotationItem.query.filter_by(sales_order_item_status=status).count()
+            if count > 0:
+                sales_order_item_status_counts[status] = count
         
         # Calculate average items per quotation
         total_items = QuotationItem.query.count()
         avg_items_per_quotation = round(total_items / total, 2) if total > 0 else 0
+        
+        # Get completed quotations statistics
+        completed_quotations = Quotation.query.filter_by(status='completed').count()
+        completed_items = QuotationItem.query.join(Quotation).filter(Quotation.status == 'completed').count()
+        
+        # Get sales order statistics
+        sales_order_items = QuotationItem.query.filter_by(sales_order_created=True).count()
+        rejected_items = QuotationItem.query.filter_by(item_status='rejected').count()
+        
+        # Get item status counts for completed quotations only
+        completed_item_status_counts = {}
+        for status in all_item_statuses:
+            count = QuotationItem.query.join(Quotation)\
+                .filter(Quotation.status == 'completed')\
+                .filter(QuotationItem.item_status == status)\
+                .count()
+            if count > 0:
+                completed_item_status_counts[status] = count
+        
+        # Get sales order item status counts for completed quotations (NEW)
+        completed_sales_order_item_status_counts = {}
+        for status in all_sales_order_item_statuses:
+            count = QuotationItem.query.join(Quotation)\
+                .filter(Quotation.status == 'completed')\
+                .filter(QuotationItem.sales_order_item_status == status)\
+                .count()
+            if count > 0:
+                completed_sales_order_item_status_counts[status] = count
         
         return jsonify({
             'success': True,
             'data': {
                 'total': total,
                 'status_counts': status_counts,
+                'sales_order_status_counts': sales_order_status_counts,
                 'monthly_totals': monthly_data,
                 'current_month_revenue': current_month_revenue,
                 'year': current_year,
                 'item_statistics': {
                     'total_items': total_items,
                     'avg_items_per_quotation': avg_items_per_quotation,
-                    'status_counts': item_status_counts
+                    'status_counts': item_status_counts,
+                    'sales_order_item_status_counts': sales_order_item_status_counts,
+                    'sales_order_items': sales_order_items,
+                    'rejected_items': rejected_items
+                },
+                'completed_statistics': {
+                    'total_completed': completed_quotations,
+                    'total_completed_items': completed_items,
+                    'item_status_counts': completed_item_status_counts,
+                    'sales_order_item_status_counts': completed_sales_order_item_status_counts
                 }
             }
         }), 200
@@ -492,13 +867,6 @@ def bulk_update_item_status(quote_id):
     try:
         quotation = Quotation.query.get_or_404(quote_id)
         
-        # Check if quotation is completed
-        if quotation.status.lower() == 'completed':
-            return jsonify({
-                'success': False, 
-                'message': 'Cannot update items in a completed quotation'
-            }), 400
-        
         data = request.get_json()
         
         item_ids = data.get('item_ids', [])
@@ -507,7 +875,8 @@ def bulk_update_item_status(quote_id):
         if not item_ids:
             return jsonify({'success': False, 'message': 'No items provided'}), 400
         
-        valid_statuses = ['pending', 'approved', 'rejected', 'dispatched', 'delivered']
+        # Accept both old and new status values
+        valid_statuses = ['pending', 'approved', 'rejected', 'ordered', 'dispatched', 'delivered', 'accepted']
         if new_status not in valid_statuses:
             return jsonify({'success': False, 'message': 'Invalid item status'}), 400
         
@@ -542,20 +911,41 @@ def bulk_update_item_status(quote_id):
 def search_quotations():
     try:
         search_term = request.args.get('q', '').strip()
+        status_filter = request.args.get('status')
+        sales_order_status_filter = request.args.get('sales_order_status')
+        
         if not search_term:
             return jsonify({'success': False, 'message': 'Search term required'}), 400
         
+        # Build base query
+        base_query = Quotation.query
+        
+        # Apply status filter if provided
+        if status_filter:
+            base_query = base_query.filter_by(status=status_filter)
+        
+        # Apply sales order status filter if provided (NEW)
+        if sales_order_status_filter:
+            base_query = base_query.filter_by(sales_order_status=sales_order_status_filter)
+        
         # Search in company name, quote number, contact person, and notes
-        quotations = Quotation.query.filter(
+        quotations = base_query.filter(
             (Quotation.company_name.ilike(f'%{search_term}%')) |
             (Quotation.quote_number.ilike(f'%{search_term}%')) |
             (Quotation.contact_person.ilike(f'%{search_term}%')) |
             (Quotation.notes.ilike(f'%{search_term}%')) |
-            (Quotation.requote_note.ilike(f'%{search_term}%'))
+            (Quotation.requote_note.ilike(f'%{search_term}%')) |
+            (Quotation.sales_order_number.ilike(f'%{search_term}%'))  # NEW: Search in sales order number
         ).order_by(Quotation.created_at.desc()).limit(50).all()
         
         # Also search in items
-        item_quotations = Quotation.query.join(QuotationItem).filter(
+        item_base_query = Quotation.query
+        if status_filter:
+            item_base_query = item_base_query.filter_by(status=status_filter)
+        if sales_order_status_filter:
+            item_base_query = item_base_query.filter_by(sales_order_status=sales_order_status_filter)
+            
+        item_quotations = item_base_query.join(QuotationItem).filter(
             QuotationItem.item_name.ilike(f'%{search_term}%') |
             QuotationItem.description.ilike(f'%{search_term}%') |
             QuotationItem.supplier_part_no.ilike(f'%{search_term}%')
@@ -579,8 +969,18 @@ def search_quotations():
 def get_recent_quotations():
     try:
         limit = int(request.args.get('limit', 10))
+        status_filter = request.args.get('status')
+        sales_order_status_filter = request.args.get('sales_order_status')
         
-        recent_quotations = Quotation.query\
+        query = Quotation.query
+        
+        if status_filter:
+            query = query.filter_by(status=status_filter)
+        
+        if sales_order_status_filter:
+            query = query.filter_by(sales_order_status=sales_order_status_filter)
+            
+        recent_quotations = query\
             .order_by(Quotation.created_at.desc())\
             .limit(limit)\
             .all()
@@ -627,6 +1027,11 @@ def create_requote(quote_id):
             requote_date=datetime.now(),
             status='draft',  # New re-quote starts as draft
             review_status='pending',
+            # Reset sales order fields for re-quote
+            sales_order_number=None,
+            sales_order_date=None,
+            sales_order_status='not_created',
+            sales_order_remark='',
             created_by=data.get('created_by', original_quotation.created_by),
             updated_by=data.get('updated_by'),
             created_at=datetime.now(),
@@ -655,6 +1060,10 @@ def create_requote(quote_id):
                 tax_rate=original_item.tax_rate,
                 item_status='pending',  # Reset status for re-quote
                 review_status='pending',
+                sales_order_created=False,  # Reset sales order status
+                sales_order_remark='',
+                sales_order_item_status='not_created',  # Reset sales order item status
+                rejection_reason='',  # Reset rejection reason
                 updated_by=data.get('updated_by'),
                 price_per_unit=original_item.price_per_unit,
                 amount_before_discount=original_item.amount_before_discount,
@@ -694,6 +1103,250 @@ def get_requotes(quote_id):
             'success': True,
             'data': [quote.to_dict() for quote in requotes],
             'count': len(requotes)
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# Get rejected items from completed quotations
+@quotation_bp.route("/api/quotations/items/rejected", methods=["GET"])
+def get_rejected_items():
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        
+        # Filter: status == 'completed' AND item_status == 'rejected'
+        query = QuotationItem.query\
+            .join(Quotation, QuotationItem.quotation_id == Quotation.id)\
+            .filter(Quotation.status == 'completed')\
+            .filter(QuotationItem.item_status == 'rejected')
+        
+        # Get total count
+        total = query.count()
+        
+        # Calculate offset
+        offset = (page - 1) * per_page
+        
+        # Get paginated results
+        items = query.order_by(Quotation.created_at.desc())\
+            .offset(offset).limit(per_page).all()
+        
+        result = []
+        for item in items:
+            quotation = item.quotation
+            result.append({
+                "id": item.id,
+                "item_name": item.item_name,
+                "description": item.description,
+                "quantity": item.quantity,
+                "unit": item.unit,
+                "price_per_unit": item.price_per_unit,
+                "item_total": item.item_total,
+                "item_status": item.item_status,
+                "sales_order_item_status": item.sales_order_item_status,
+                "rejection_reason": item.rejection_reason,
+                "quotation_id": quotation.id,
+                "quote_number": quotation.quote_number,
+                "sales_order_number": quotation.sales_order_number,
+                "sales_order_status": quotation.sales_order_status,
+                "date": quotation.date,
+                "time": quotation.time,
+                "company_name": quotation.company_name,
+                "company_address": quotation.company_address,
+                "contact_person": quotation.contact_person,
+                "contact_mobile": quotation.contact_mobile,
+                "contact_email": quotation.contact_email,
+                "subtotal": quotation.subtotal,
+                "total_tax": quotation.total_tax,
+                "grand_total": quotation.grand_total
+            })
+        
+        # Calculate total pages
+        total_pages = (total + per_page - 1) // per_page if per_page > 0 else 1
+        
+        return jsonify({
+            "success": True,
+            "data": result,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": total_pages
+            }
+        }), 200
+
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+
+# Get rejected items statistics
+@quotation_bp.route('/api/quotations/items/rejected/stats', methods=['GET'])
+def get_rejected_stats():
+    try:
+        # Get total count of rejected items from completed quotations
+        total_rejected = QuotationItem.query\
+            .join(Quotation, QuotationItem.quotation_id == Quotation.id)\
+            .filter(Quotation.status == 'completed')\
+            .filter(QuotationItem.item_status == 'rejected')\
+            .count()
+        
+        # Get current year
+        current_year = datetime.now().year
+        
+        # Get rejected items by month (current year)
+        monthly_stats = db.session.query(
+            extract('month', Quotation.created_at).label('month'),
+            func.count().label('count')
+        ).join(QuotationItem, QuotationItem.quotation_id == Quotation.id)\
+         .filter(Quotation.status == 'completed')\
+         .filter(QuotationItem.item_status == 'rejected')\
+         .filter(extract('year', Quotation.created_at) == current_year)\
+         .group_by(extract('month', Quotation.created_at))\
+         .order_by('month')\
+         .all()
+        
+        # Format monthly data
+        by_month = []
+        for stat in monthly_stats:
+            by_month.append({
+                'month': stat.month,
+                'count': stat.count
+            })
+        
+        # Get rejected items by company (top 5)
+        company_stats = db.session.query(
+            Quotation.company_name,
+            func.count().label('count')
+        ).join(QuotationItem, QuotationItem.quotation_id == Quotation.id)\
+         .filter(Quotation.status == 'completed')\
+         .filter(QuotationItem.item_status == 'rejected')\
+         .group_by(Quotation.company_name)\
+         .order_by(func.count().desc())\
+         .limit(5)\
+         .all()
+        
+        # Format company data
+        by_company = []
+        for stat in company_stats:
+            by_company.append({
+                'company_name': stat.company_name,
+                'count': stat.count
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'total': total_rejected,
+                'byMonth': by_month,
+                'byCompany': by_company
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# NEW: Get quotations by sales order status
+@quotation_bp.route('/api/quotations/by-sales-order-status/<string:status>', methods=['GET'])
+def get_quotations_by_sales_order_status(status):
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        
+        valid_statuses = ['not_created', 'draft', 'confirmed', 'in_production', 
+                         'ready_for_dispatch', 'dispatched', 'delivered', 'cancelled']
+        
+        if status not in valid_statuses:
+            return jsonify({'success': False, 'message': 'Invalid sales order status'}), 400
+        
+        query = Quotation.query.filter_by(sales_order_status=status)
+        
+        quotations = query.order_by(Quotation.created_at.desc())\
+                         .paginate(page=page, per_page=per_page, error_out=False)
+        
+        result = {
+            'success': True,
+            'data': [quote.to_dict() for quote in quotations.items],
+            'pagination': {
+                'page': quotations.page,
+                'per_page': quotations.per_page,
+                'total': quotations.total,
+                'pages': quotations.pages
+            }
+        }
+        return jsonify(result), 200
+        
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+
+# NEW: Get items by sales order item status
+@quotation_bp.route('/api/quotations/items/by-sales-order-status/<string:status>', methods=['GET'])
+def get_items_by_sales_order_item_status(status):
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        quotation_id = request.args.get('quotation_id')
+        
+        valid_statuses = ['not_created', 'ordered', 'in_production', 'ready', 'dispatched', 'delivered', 'rejected']
+        
+        if status not in valid_statuses:
+            return jsonify({'success': False, 'message': 'Invalid sales order item status'}), 400
+        
+        query = QuotationItem.query.filter_by(sales_order_item_status=status)
+        
+        # Filter by quotation if provided
+        if quotation_id:
+            query = query.filter_by(quotation_id=quotation_id)
+        
+        # Get total count
+        total = query.count()
+        
+        # Calculate offset
+        offset = (page - 1) * per_page
+        
+        # Get paginated results
+        items = query.order_by(QuotationItem.updated_at.desc())\
+            .offset(offset).limit(per_page).all()
+        
+        result = []
+        for item in items:
+            quotation = item.quotation
+            result.append({
+                "id": item.id,
+                "item_name": item.item_name,
+                "description": item.description,
+                "quantity": item.quantity,
+                "unit": item.unit,
+                "price_per_unit": item.price_per_unit,
+                "item_total": item.item_total,
+                "item_status": item.item_status,
+                "sales_order_item_status": item.sales_order_item_status,
+                "sales_order_created": item.sales_order_created,
+                "sales_order_remark": item.sales_order_remark,
+                "rejection_reason": item.rejection_reason,
+                "quotation_id": quotation.id,
+                "quote_number": quotation.quote_number,
+                "sales_order_number": quotation.sales_order_number,
+                "sales_order_status": quotation.sales_order_status,
+                "date": quotation.date,
+                "time": quotation.time,
+                "company_name": quotation.company_name,
+                "company_address": quotation.company_address,
+                "contact_person": quotation.contact_person,
+                "contact_mobile": quotation.contact_mobile,
+                "contact_email": quotation.contact_email
+            })
+        
+        # Calculate total pages
+        total_pages = (total + per_page - 1) // per_page if per_page > 0 else 1
+        
+        return jsonify({
+            "success": True,
+            "data": result,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": total_pages
+            }
         }), 200
         
     except Exception as e:

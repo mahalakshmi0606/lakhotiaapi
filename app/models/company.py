@@ -14,6 +14,8 @@ class Company(db.Model):
     department = db.Column(db.String(100), nullable=False)
     personal_mobile = db.Column(db.String(15), nullable=False)
     personal_email = db.Column(db.String(100), nullable=False)
+    # ✅ NEW FIELD
+    gst_number = db.Column(db.String(20), nullable=True)
 
     def to_dict(self):
         return {
@@ -27,5 +29,7 @@ class Company(db.Model):
             "customerEmail": self.customer_email,
             "department": self.department,
             "personalMobile": self.personal_mobile,
-            "personalEmail": self.personal_email
+            "personalEmail": self.personal_email,
+            # ✅ NEW FIELD
+            "gstNumber": self.gst_number
         }

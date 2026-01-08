@@ -47,10 +47,11 @@ class Employee(db.Model):
             "altContact": self.altContact,
             "pan": self.pan,
             "aadhar": self.aadhar,
+            "password": self.password,  # ✅ ADDED THIS LINE - MOST IMPORTANT!
             "photo": self.photo,
             "panAttachment": self.panAttachment,
             "aadharAttachment": self.aadharAttachment,
-            "esiPfStatus": self.esiPfStatus,  # ✅ updated key
+            "esiPfStatus": self.esiPfStatus,
             "createdBy": self.createdBy,
             "createdAt": self.createdAt.strftime("%Y-%m-%d %H:%M:%S") if self.createdAt else None
         }

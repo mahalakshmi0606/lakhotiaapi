@@ -1,13 +1,17 @@
 from app import db
 from datetime import datetime
+from decimal import Decimal
 
 class Task(db.Model):
     __tablename__ = "tasks"
 
     id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(100))
+    
+    # ✅ PO Number instead of Title
+    po_number = db.Column(db.String(100), nullable=False, default="")  # Added default=""
+    
     description = db.Column(db.Text)
-    priority = db.Column(db.String(20))
+    priority = db.Column(db.String(20), default="Medium")
     dueDate = db.Column(db.String(50))
     assignedTo = db.Column(db.String(100))
     assignedBy = db.Column(db.String(100))
@@ -17,11 +21,14 @@ class Task(db.Model):
     quotation_id = db.Column(db.Integer)
     quotation_number = db.Column(db.String(50))
     company_name = db.Column(db.String(100))
+    company_address = db.Column(db.Text)  # Added for completeness
     item_id = db.Column(db.Integer)
     item_name = db.Column(db.String(100))
     
-    # ✅ Item details from quotation
+    # ✅ Item details from quotation - UPDATED
     supplier_part_no = db.Column(db.String(100))
+    brand_code = db.Column(db.String(100))  # ✅ NEW: Brand Code from quotation
+    batch_no = db.Column(db.String(100))    # ✅ NEW: Batch Number from quotation
     hsn_sac = db.Column(db.String(50))
     cut_width = db.Column(db.String(50))
     length = db.Column(db.String(50))
@@ -37,7 +44,7 @@ class Task(db.Model):
     note = db.Column(db.Text)
     createdAt = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # ✅ Invoice details (new)
+    # ✅ Invoice details
     invoice_number = db.Column(db.String(100))
     invoice_date = db.Column(db.DateTime)
     invoice_amount = db.Column(db.Float)
@@ -49,7 +56,25 @@ class Task(db.Model):
     production_end_date = db.Column(db.DateTime)
     production_status = db.Column(db.String(50))
     quality_check = db.Column(db.String(50))
+    
+    # ✅ Additional tracking fields
+    updatedAt = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    completedAt = db.Column(db.DateTime)
+    cancelledAt = db.Column(db.DateTime)
+    cancellation_reason = db.Column(db.Text)
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Auto-generate PO number if not provided
+        if not self.po_number or self.po_number.strip() == "":
+            self.po_number = self._generate_po_number()
+    
+    def _generate_po_number(self):
+        """Generate PO number based on timestamp and quotation"""
+        timestamp = datetime.utcnow().strftime("%y%m%d%H%M")
+        quote_part = self.quotation_number[-4:] if self.quotation_number else "0000"
+        return f"PO-{timestamp}-{quote_part}"
+    
     def to_dict(self):
         """Convert model to dictionary for JSON responses"""
         result = {}
@@ -57,6 +82,11 @@ class Task(db.Model):
             value = getattr(self, c.name)
             if isinstance(value, datetime):
                 result[c.name] = value.isoformat() if value else None
+            elif isinstance(value, Decimal):
+                result[c.name] = float(value)
             else:
                 result[c.name] = value
         return result
+    
+    def __repr__(self):
+        return f"<Task {self.po_number}: {self.item_name} - {self.status}>"
