@@ -28,7 +28,7 @@ def search_stock():
                 Stock.brand_description.ilike(f"%{search_term}%"),
                 Stock.batch_code.ilike(f"%{search_term}%")
             )
-        ).order_by(Stock.brand_code)
+        ).order_by(Stock.id.desc())
         
         items = search_query.limit(50).all()  # Limit to 50 results
         
@@ -36,16 +36,19 @@ def search_stock():
         for s in items:
             output.append({
                 "id": s.id,
+                "ID": s.stock_id,
                 "Item Name": s.item_name,
-                "Brand": s.brand,
+                "Brand": s.brand,  # Added Brand field
+                "Length": s.length,
+                "Width": s.width,
+                "Qty": s.quantity,
+                "AutoCalculate Count": s.auto_calculate_count,
+                "Buy Price": s.buy_price,
+                "Batch Code": s.batch_code,
                 "Brand Code": s.brand_code,
                 "Brand Description": s.brand_description,
                 "HSN": s.hsn,
-                "Batch Code": s.batch_code,
                 "MRP": s.mrp,
-                "Buy Price": s.buy_price,
-                "Width": s.width,
-                "Length": s.length,
                 "Unit": s.unit,
                 "GST": s.gst,
                 "created_at": s.created_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -82,6 +85,7 @@ def get_buy_price(brand_code):
         return jsonify({
             "success": True,
             "data": {
+                "stock_id": stock.stock_id,
                 "brand_code": stock.brand_code,
                 "item_name": stock.item_name,
                 "buy_price": stock.buy_price,
@@ -128,6 +132,7 @@ def get_bulk_buy_prices():
             stock = stock_map.get(code)
             if stock:
                 results.append({
+                    "stock_id": stock.stock_id,
                     "brand_code": code,
                     "item_name": stock.item_name,
                     "buy_price": stock.buy_price,
@@ -171,32 +176,59 @@ def bulk_save_stock():
         duplicates = []
 
         for r in records:
-
+            stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
-
-            if not brand_code:
+            
+            # Check if record already exists by BOTH stock_id AND brand_code
+            existing_stock = None
+            if stock_id:
+                existing_stock = Stock.query.filter_by(stock_id=stock_id).first()
+            
+            # If not found by stock_id, try brand_code
+            if not existing_stock and brand_code:
+                existing_stock = Stock.query.filter_by(brand_code=brand_code).first()
+            
+            if existing_stock:
+                # Record exists, skip insertion to avoid duplicate
+                duplicates.append(stock_id if stock_id else brand_code)
+                continue
+            
+            # If no ID provided, generate one from brand code
+            if not stock_id and brand_code:
+                stock_id = f"ID_{brand_code}"
+            elif not stock_id:
+                # Skip records with no identifier
                 continue
 
-            # Check if stock exists
-            exists = Stock.query.filter_by(brand_code=brand_code).first()
-            if exists:
-                duplicates.append(brand_code)
-                continue
+            # Parse numeric values with defaults
+            try:
+                length_val = float(r.get("Length", 0))
+                width_val = float(r.get("Width", 0))
+                qty_val = float(r.get("Qty", 0))
+                auto_count = length_val * width_val * qty_val
+            except:
+                length_val = 0
+                width_val = 0
+                qty_val = 0
+                auto_count = 0
 
             # CREATE NEW RECORD
             new_stock = Stock(
+                stock_id=stock_id,
                 item_name=r.get("Item Name", "").strip(),
-                brand=r.get("Brand", "").strip(),
+                brand=r.get("Brand", "").strip(),  # Brand field
+                length=length_val,
+                width=width_val,
+                quantity=qty_val,
+                auto_calculate_count=auto_count,
+                buy_price=float(r.get("Buy Price", 0)),
+                batch_code=r.get("Batch Code", "").strip(),
                 brand_code=brand_code,
                 brand_description=r.get("Brand Description", "").strip(),
                 hsn=r.get("HSN", "").strip(),
-                batch_code=r.get("Batch Code", "").strip(),
                 mrp=float(r.get("MRP", 0)),
-                buy_price=float(r.get("Buy Price", 0)),
-                width=r.get("Width", 0),
-                length=r.get("Length", 0),
-                unit=r.get("Unit", ""),
-                gst=float(r.get("GST", 0)),
+                unit=r.get("Unit", "").strip(),
+                gst=float(r.get("GST", 0))
             )
 
             db.session.add(new_stock)
@@ -218,9 +250,9 @@ def bulk_save_stock():
 
 
 # -------------------------------------------------------
-# BULK UPDATE ALL FIELDS (USING BRAND CODE)
+# BULK UPDATE ALL FIELDS (USING ID or BRAND CODE)
 # -------------------------------------------------------
-@stock_bp.route("/update", methods=["POST", "OPTIONS"])
+@stock_bp.route("/update", methods=["PUT", "OPTIONS"])
 def update_stock_bulk():
     if request.method == "OPTIONS":
         return jsonify({"message": "OK"}), 200
@@ -236,33 +268,54 @@ def update_stock_bulk():
         not_found = []
 
         for r in records:
-
-            r.pop("_id", None)  # Remove React internal ID
+            # Remove React internal ID
+            if '_id' in r:
+                del r['_id']
+            
+            # Try ID first, then brand code
+            stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
+            
+            stock = None
+            if stock_id:
+                stock = Stock.query.filter_by(stock_id=stock_id).first()
+            
+            if not stock and brand_code:
+                stock = Stock.query.filter_by(brand_code=brand_code).first()
 
-            if not brand_code:
+            if not stock:
+                not_found.append(stock_id if stock_id else brand_code)
                 continue
 
-            stock = Stock.query.filter_by(brand_code=brand_code).first()
+            # Parse and calculate auto count
+            try:
+                length_val = float(r.get("Length", stock.length))
+                width_val = float(r.get("Width", stock.width))
+                qty_val = float(r.get("Qty", stock.quantity))
+                auto_count = length_val * width_val * qty_val
+            except:
+                length_val = stock.length
+                width_val = stock.width
+                qty_val = stock.quantity
+                auto_count = stock.auto_calculate_count
+            
+            # Update all fields
+            stock.item_name = r.get("Item Name", stock.item_name).strip()
+            stock.brand = r.get("Brand", stock.brand).strip()  # Brand field
+            stock.length = length_val
+            stock.width = width_val
+            stock.quantity = qty_val
+            stock.auto_calculate_count = auto_count
+            stock.buy_price = float(r.get("Buy Price", stock.buy_price))
+            stock.batch_code = r.get("Batch Code", stock.batch_code).strip()
+            stock.brand_code = brand_code if brand_code else stock.brand_code
+            stock.brand_description = r.get("Brand Description", stock.brand_description).strip()
+            stock.hsn = r.get("HSN", stock.hsn).strip()
+            stock.mrp = float(r.get("MRP", stock.mrp))
+            stock.unit = r.get("Unit", stock.unit).strip()
+            stock.gst = float(r.get("GST", stock.gst))
 
-            if stock:
-                stock.item_name = r.get("Item Name", stock.item_name).strip()
-                stock.brand = r.get("Brand", stock.brand).strip()
-                stock.brand_description = r.get(
-                    "Brand Description", stock.brand_description
-                ).strip()
-                stock.hsn = r.get("HSN", stock.hsn).strip()
-                stock.batch_code = r.get("Batch Code", stock.batch_code).strip()
-                stock.mrp = float(r.get("MRP", stock.mrp))
-                stock.buy_price = float(r.get("Buy Price", stock.buy_price))
-                stock.width = r.get("Width", stock.width)
-                stock.length = r.get("Length", stock.length)
-                stock.unit = r.get("Unit", stock.unit)
-                stock.gst = float(r.get("GST", stock.gst))
-
-                updated_count += 1
-            else:
-                not_found.append(brand_code)
+            updated_count += 1
 
         db.session.commit()
 
@@ -275,6 +328,69 @@ def update_stock_bulk():
 
     except Exception as e:
         print("Bulk Update Error:", e)
+        db.session.rollback()
+        return jsonify({"success": False, "message": "Server error"}), 500
+
+
+# -------------------------------------------------------
+# UPDATE QUANTITY SPECIFICALLY (PUT METHOD)
+# -------------------------------------------------------
+@stock_bp.route("/update-quantity", methods=["PUT", "OPTIONS"])
+def update_quantity_bulk():
+    if request.method == "OPTIONS":
+        return jsonify({"message": "OK"}), 200
+
+    try:
+        data = request.get_json()
+        records = data.get("records", [])
+
+        if not records:
+            return jsonify({"success": False, "message": "No data found"}), 400
+
+        updated = 0
+        not_found = []
+
+        for r in records:
+            stock_id = str(r.get("ID", "")).strip()
+            brand_code = str(r.get("Brand Code", "")).strip()
+            new_quantity = r.get("Qty", None)
+            
+            if new_quantity is None:
+                continue
+
+            stock = None
+            if stock_id:
+                stock = Stock.query.filter_by(stock_id=stock_id).first()
+            
+            if not stock and brand_code:
+                stock = Stock.query.filter_by(brand_code=brand_code).first()
+
+            if stock:
+                try:
+                    # Parse the new quantity
+                    qty_val = float(new_quantity)
+                    
+                    # Update quantity and recalculate auto_calculate_count
+                    stock.quantity = qty_val
+                    stock.auto_calculate_count = stock.length * stock.width * qty_val
+                    
+                    updated += 1
+                except ValueError:
+                    not_found.append(f"{stock_id if stock_id else brand_code} (invalid quantity)")
+            else:
+                not_found.append(stock_id if stock_id else brand_code)
+
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Quantity updated successfully",
+            "updated": updated,
+            "not_found": not_found
+        }), 200
+
+    except Exception as e:
+        print("Bulk Quantity Update Error:", e)
         db.session.rollback()
         return jsonify({"success": False, "message": "Server error"}), 500
 
@@ -298,20 +414,23 @@ def update_mrp_bulk():
         not_found = []
 
         for r in records:
+            stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
             mrp = r.get("MRP", None)
 
-            if not brand_code:
-                continue
-
-            stock = Stock.query.filter_by(brand_code=brand_code).first()
+            stock = None
+            if stock_id:
+                stock = Stock.query.filter_by(stock_id=stock_id).first()
+            
+            if not stock and brand_code:
+                stock = Stock.query.filter_by(brand_code=brand_code).first()
 
             if stock:
                 if mrp is not None:
                     stock.mrp = float(mrp)
                 updated += 1
             else:
-                not_found.append(brand_code)
+                not_found.append(stock_id if stock_id else brand_code)
 
         db.session.commit()
 
@@ -340,16 +459,19 @@ def get_all_stock():
         for s in items:
             output.append({
                 "id": s.id,
+                "ID": s.stock_id,
                 "Item Name": s.item_name,
-                "Brand": s.brand,
+                "Brand": s.brand,  # Added Brand field
+                "Length": s.length,
+                "Width": s.width,
+                "Qty": s.quantity,
+                "AutoCalculate Count": s.auto_calculate_count,
+                "Buy Price": s.buy_price,
+                "Batch Code": s.batch_code,
                 "Brand Code": s.brand_code,
                 "Brand Description": s.brand_description,
                 "HSN": s.hsn,
-                "Batch Code": s.batch_code,
                 "MRP": s.mrp,
-                "Buy Price": s.buy_price,
-                "Width": s.width,
-                "Length": s.length,
                 "Unit": s.unit,
                 "GST": s.gst,
                 "created_at": s.created_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -359,4 +481,44 @@ def get_all_stock():
 
     except Exception as e:
         print("Get All Error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+
+
+# -------------------------------------------------------
+# DELETE STOCK BY ID or BRAND CODE
+# -------------------------------------------------------
+@stock_bp.route("/delete", methods=["DELETE", "OPTIONS"])
+def delete_stock():
+    if request.method == "OPTIONS":
+        return jsonify({"message": "OK"}), 200
+
+    try:
+        data = request.get_json()
+        stock_id = str(data.get("ID", "")).strip()
+        brand_code = str(data.get("Brand Code", "")).strip()
+
+        stock = None
+        if stock_id:
+            stock = Stock.query.filter_by(stock_id=stock_id).first()
+        
+        if not stock and brand_code:
+            stock = Stock.query.filter_by(brand_code=brand_code).first()
+
+        if not stock:
+            return jsonify({
+                "success": False,
+                "message": "Stock item not found"
+            }), 404
+
+        db.session.delete(stock)
+        db.session.commit()
+
+        return jsonify({
+            "success": True,
+            "message": "Stock deleted successfully"
+        }), 200
+
+    except Exception as e:
+        print("Delete Error:", e)
+        db.session.rollback()
         return jsonify({"success": False, "message": "Server error"}), 500

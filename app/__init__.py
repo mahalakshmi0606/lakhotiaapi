@@ -1,4 +1,5 @@
-from flask import Flask, jsonify
+import os
+from flask import Flask, jsonify, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_cors import CORS
@@ -20,7 +21,18 @@ def create_app(config_class=Config):
     db.init_app(app)
     migrate.init_app(app, db)
 
+    # ==================================================
+    # ✅ SERVE UPLOADED FILES (FIX FOR IMAGE 404)
+    # ==================================================
+    UPLOAD_ROOT = os.path.join(os.getcwd(), "uploads")
+
+    @app.route("/uploads/<path:filename>")
+    def serve_uploads(filename):
+        return send_from_directory(UPLOAD_ROOT, filename)
+
+    # ==================================================
     # ✅ Register blueprints
+    # ==================================================
     from app.routes.login_routes import auth_bp
     from app.routes.usertype_routes import user_type_bp
     from app.routes.designation_routes import designation_bp
@@ -45,37 +57,39 @@ def create_app(config_class=Config):
     from app.routes.mrpchange_routes import mrp_bp
     from app.routes.quotation_routes import quotation_bp
     from app.routes.purchaseorder_routes import purchase_order_bp
-
+    from app.routes.enquiry_routes import enquiry_bp
+    from app.routes.dashboardsetter_routes import dashboardsetter_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
     app.register_blueprint(user_type_bp, url_prefix="/api")
-    app.register_blueprint(designation_bp,url_prefix="/api")
-    app.register_blueprint(department_bp,url_prefix="/api/department")
-    app.register_blueprint(employee_bp,url_prefix="/api/employee")
-    app.register_blueprint(company_bp,url_prefix="/api")
+    app.register_blueprint(designation_bp, url_prefix="/api")
+    app.register_blueprint(department_bp, url_prefix="/api/department")
+    app.register_blueprint(employee_bp, url_prefix="/api/employee")
+    app.register_blueprint(company_bp, url_prefix="/api")
     app.register_blueprint(visitreport_bp)
     app.register_blueprint(task_bp)
     app.register_blueprint(industrial_bp)
     app.register_blueprint(advance_bp)
-    app.register_blueprint(access_bp,url_prefix="/api")
+    app.register_blueprint(access_bp, url_prefix="/api")
     app.register_blueprint(holiday_bp)
     app.register_blueprint(noesi_bp)
-    app.register_blueprint(settings_bp,url_prefix="/api")
-    app.register_blueprint(attendance_bp,url_prefix="/api")
+    app.register_blueprint(settings_bp, url_prefix="/api")
+    app.register_blueprint(attendance_bp, url_prefix="/api")
     app.register_blueprint(attendance_summary_bp)
     app.register_blueprint(stock_bp)
     app.register_blueprint(casual_bp)
     app.register_blueprint(esipf_bp)
-    app.register_blueprint(grn_bp,url_prefix="/api/grn/")
+    app.register_blueprint(grn_bp, url_prefix="/api/grn/")
     app.register_blueprint(stock_sold_bp)
     app.register_blueprint(mrp_bp)
     app.register_blueprint(quotation_bp)
+    app.register_blueprint(dashboardsetter_bp)
     app.register_blueprint(purchase_order_bp, url_prefix="/api/purchase-orders")
+    app.register_blueprint(enquiry_bp)
 
-
-
-
-    # ✅ Health check route
+    # ==================================================
+    # ✅ Health check
+    # ==================================================
     @app.route("/api/ping")
     def ping():
         return jsonify({"success": True, "message": "pong"}), 200

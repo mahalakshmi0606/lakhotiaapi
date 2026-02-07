@@ -12,6 +12,14 @@ def add_company():
     data = request.json
 
     try:
+        # 🔁 Check duplicate email
+        existing = Company.query.filter_by(customer_email=data.get("customerEmail")).first()
+        if existing:
+            return jsonify({
+                "success": False,
+                "message": "Company with this email already exists"
+            }), 409
+
         new_company = Company(
             company_name=data.get("companyName"),
             company_address=data.get("companyAddress"),
@@ -23,19 +31,59 @@ def add_company():
             department=data.get("department"),
             personal_mobile=data.get("personalMobile"),
             personal_email=data.get("personalEmail"),
-            # ✅ NEW FIELD
-            gst_number=data.get("gstNumber")
+            gst_number=data.get("gstNumber"),
+            password=data.get("password")   # ✅ PASSWORD ADDED
         )
 
         db.session.add(new_company)
         db.session.commit()
 
-        return jsonify({"message": "Company added successfully!"}), 201
+        return jsonify({
+            "success": True,
+            "message": "Company added successfully!"
+        }), 201
 
     except Exception as e:
         print("Error:", e)
         db.session.rollback()
-        return jsonify({"message": "Error adding company"}), 500
+        return jsonify({"success": False, "message": "Error adding company"}), 500
+
+
+# ======================================================
+#                 COMPANY LOGIN
+# ======================================================
+@company_bp.route("/company/login", methods=["POST"])
+def company_login():
+    try:
+        data = request.get_json()
+        email = data.get("email")
+        password = data.get("password")
+
+        if not email or not password:
+            return jsonify({
+                "success": False,
+                "message": "Email and password are required"
+            }), 400
+
+        company = Company.query.filter_by(customer_email=email).first()
+
+        if not company or company.password != password:
+            return jsonify({
+                "success": False,
+                "message": "Invalid email or password"
+            }), 401
+
+        return jsonify({
+            "success": True,
+            "message": "Login successful",
+            "company": company.to_dict()
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error: {str(e)}"
+        }), 500
 
 
 # ======================================================
@@ -61,11 +109,10 @@ def get_company(id):
 
 
 # ======================================================
-# ⭐ GET COMPANY BY MOBILE — RETURN NAME + CUSTOMER NAME
+# ⭐ GET COMPANY BY MOBILE — NAME + CUSTOMER + GST
 # ======================================================
 @company_bp.route("/company/mobile/<string:mobile>", methods=["GET"])
 def get_company_by_mobile(mobile):
-    # Ensure clean 10-digit mobile (optional but safer)
     mobile = ''.join(filter(str.isdigit, mobile))[-10:]
 
     company = Company.query.filter_by(customer_mobile=mobile).first()
@@ -76,7 +123,7 @@ def get_company_by_mobile(mobile):
     return jsonify({
         "company_name": company.company_name,
         "customer_name": company.customer_name,
-        "gst_number": company.gst_number  # ✅ NEW FIELD
+        "gst_number": company.gst_number
     }), 200
 
 
@@ -108,18 +155,21 @@ def update_company(id):
     data = request.json
 
     try:
-        company.company_name = data.get("companyName")
-        company.company_address = data.get("companyAddress")
-        company.pin_code = data.get("pinCode")
-        company.industry_segment = data.get("industrySegment")
-        company.customer_name = data.get("customerName")
-        company.customer_mobile = data.get("customerMobile")
-        company.customer_email = data.get("customerEmail")
-        company.department = data.get("department")
-        company.personal_mobile = data.get("personalMobile")
-        company.personal_email = data.get("personalEmail")
-        # ✅ NEW FIELD
-        company.gst_number = data.get("gstNumber")
+        company.company_name = data.get("companyName", company.company_name)
+        company.company_address = data.get("companyAddress", company.company_address)
+        company.pin_code = data.get("pinCode", company.pin_code)
+        company.industry_segment = data.get("industrySegment", company.industry_segment)
+        company.customer_name = data.get("customerName", company.customer_name)
+        company.customer_mobile = data.get("customerMobile", company.customer_mobile)
+        company.customer_email = data.get("customerEmail", company.customer_email)
+        company.department = data.get("department", company.department)
+        company.personal_mobile = data.get("personalMobile", company.personal_mobile)
+        company.personal_email = data.get("personalEmail", company.personal_email)
+        company.gst_number = data.get("gstNumber", company.gst_number)
+
+        # ✅ Update password only if provided
+        if data.get("password"):
+            company.password = data.get("password")
 
         db.session.commit()
 
