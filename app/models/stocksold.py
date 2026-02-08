@@ -17,9 +17,13 @@ class StockSold(db.Model):
     sold_remarks = db.Column(db.String(500))
     created_on = db.Column(db.DateTime, default=datetime.utcnow)
     
-    # ✅ ADDED: Saved status tracking
+    # ✅ Saved status tracking
     is_saved = db.Column(db.Boolean, default=True, nullable=False)  # True when saved to stock sold
     saved_on = db.Column(db.DateTime)  # When it was saved
+    
+    # ✅ ADDED: Stock deducted status
+    stock_deducted = db.Column(db.String(10), default="No", nullable=False)  # Yes/No status
+    deducted_on = db.Column(db.DateTime)  # When stock was deducted
     
     # Additional fields for detailed information
     hsn_sac = db.Column(db.String(100))
@@ -34,7 +38,6 @@ class StockSold(db.Model):
     thickness = db.Column(db.String(50))
     due_date = db.Column(db.String(30))
     
-    # ⚠️ PROBLEM: These fields don't exist in database yet
     # Use property getters/setters that check if column exists
     
     # Property for length
@@ -115,6 +118,8 @@ class StockSold(db.Model):
             kwargs['is_saved'] = True
         if 'saved_on' not in kwargs and kwargs.get('is_saved', True):
             kwargs['saved_on'] = datetime.utcnow()
+        if 'stock_deducted' not in kwargs:
+            kwargs['stock_deducted'] = "No"
         
         # Ensure float fields have defaults
         float_fields = ['quantity', 'invoice_amount', 'mrp']
@@ -147,6 +152,8 @@ class StockSold(db.Model):
             "created_on": self.created_on.isoformat() if self.created_on else None,
             "is_saved": bool(self.is_saved),
             "saved_on": self.saved_on.isoformat() if self.saved_on else None,
+            "stock_deducted": self.stock_deducted or "No",  # ✅ Added
+            "deducted_on": self.deducted_on.isoformat() if self.deducted_on else None,  # ✅ Added
             "hsn_sac": self.hsn_sac or "",
             "invoice_remarks": self.invoice_remarks or "",
             "invoice_amount": float(self.invoice_amount) if self.invoice_amount else 0.0,
@@ -176,8 +183,18 @@ class StockSold(db.Model):
         self.is_saved = True
         self.saved_on = datetime.utcnow()
     
+    # ✅ Method to mark stock as deducted
+    def mark_stock_deducted(self):
+        self.stock_deducted = "Yes"
+        self.deducted_on = datetime.utcnow()
+    
+    # ✅ Method to mark stock as not deducted
+    def mark_stock_not_deducted(self):
+        self.stock_deducted = "No"
+        self.deducted_on = None
+    
     def __repr__(self):
-        return f"<StockSold {self.id}: {self.item_name} - Qty: {self.quantity} - Saved: {self.is_saved}>"
+        return f"<StockSold {self.id}: {self.item_name} - Qty: {self.quantity} - Saved: {self.is_saved} - Deducted: {self.stock_deducted}>"
     
     @classmethod
     def check_column_exists(cls, column_name):
