@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timedelta
 from sqlalchemy import func, or_
+from sqlalchemy import desc
 
 from app import db
 from app.models.enquiry import Enquiry, EnquiryItem
@@ -529,3 +530,68 @@ def expected_fields():
             }
         }
     })
+
+
+@enquiry_bp.route('/export', methods=['GET'])
+def export_enquiries():
+    """Export enquiries for a given date range"""
+    try:
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        status = request.args.get('status', '').strip()
+
+        if not start_date or not end_date:
+            return jsonify({
+                "success": False,
+                "message": "start_date and end_date are required (YYYY-MM-DD)"
+            }), 400
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+
+        query = db.session.query(Enquiry)
+
+        # Status filter
+        if status and status != "all":
+            query = query.filter(Enquiry.status == status)
+
+        # Date filter
+        if hasattr(Enquiry, "created_at"):
+            query = query.filter(
+                Enquiry.created_at >= start_dt,
+                Enquiry.created_at < end_dt
+            )
+
+        enquiries = query.order_by(desc(Enquiry.created_at)).all()
+
+        data = []
+        for e in enquiries:
+            d = e.to_dict()
+
+            # include items if needed
+            if hasattr(e, "items"):
+                d["items"] = [
+                    item.to_dict() if hasattr(item, "to_dict") else {}
+                    for item in e.items
+                ]
+
+            data.append(d)
+
+        return jsonify({
+            "success": True,
+            "count": len(data),
+            "data": data
+        }), 200
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "message": f"Invalid date format: {str(e)}"
+        }), 400
+
+    except Exception as e:
+        print("Export error:", e)
+        return jsonify({
+            "success": False,
+            "message": str(e)
+        }), 500

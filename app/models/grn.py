@@ -39,8 +39,13 @@ class GRN(db.Model):
     # Auto generated batch code
     batch_code = db.Column(db.String(100), nullable=False)
 
+    # GRN Status
+    status = db.Column(db.String(20), default="active", nullable=False)  # active, cancelled, returned
+
     # Created timestamp
     created_on = db.Column(db.DateTime, default=datetime.utcnow)
+    # Updated timestamp
+    updated_on = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     def __init__(
         self,
@@ -65,7 +70,8 @@ class GRN(db.Model):
         length=None,
         width=None,
         unit="PCS",
-        quantity=1.0
+        quantity=1.0,
+        status="active"
     ):
         self.po_number = po_number
         self.invoice_number = invoice_number
@@ -93,6 +99,7 @@ class GRN(db.Model):
         self.quantity = quantity
         self.buy_price = buy_price
         self.batch_code = batch_code
+        self.status = status
 
     def to_dict(self):
         def format_datetime(value):
@@ -128,7 +135,9 @@ class GRN(db.Model):
             "quantity": float(self.quantity) if self.quantity is not None else 1.0,
             "buy_price": float(self.buy_price) if self.buy_price is not None else 0.0,
             "batch_code": self.batch_code,
+            "status": self.status,
 
             # Safe datetime output
-            "created_on": format_datetime(self.created_on)
+            "created_on": format_datetime(self.created_on),
+            "updated_on": format_datetime(self.updated_on)
         }

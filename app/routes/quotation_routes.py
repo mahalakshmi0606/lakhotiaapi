@@ -1,9 +1,12 @@
 from flask import Blueprint, request, jsonify
-from datetime import datetime
-import uuid
-from app.models.quotation import Quotation, QuotationItem
+from datetime import datetime, timedelta
+from app.models.quotation import Quotation
 from app import db
-from sqlalchemy import func, extract, or_
+from sqlalchemy import desc
+import uuid
+from sqlalchemy import func, extract
+from app.models.quotation import QuotationItem
+
 
 quotation_bp = Blueprint('quotations', __name__)
 
@@ -1351,3 +1354,83 @@ def get_items_by_sales_order_item_status(status):
         
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
+    
+@quotation_bp.route('/api/quotations/export', methods=['GET'])
+def export_quotations():
+    """Export quotations for a given date range"""
+    try:
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        status = request.args.get('status', 'completed')
+
+        if not start_date or not end_date:
+            return jsonify({
+                "success": False,
+                "message": "Start date and end date are required"
+            }), 400
+
+        # Parse dates
+        start_datetime = datetime.strptime(start_date, '%Y-%m-%d')
+        end_datetime = datetime.strptime(end_date, '%Y-%m-%d') + timedelta(days=1)
+
+        # ✅ Use Flask-SQLAlchemy session
+        query = db.session.query(Quotation)
+
+        # Status filter
+        if status != 'all':
+            query = query.filter(Quotation.status == status)
+
+        # Date filter
+        if hasattr(Quotation, 'createdAt'):
+            query = query.filter(
+                Quotation.createdAt >= start_datetime,
+                Quotation.createdAt < end_datetime
+            )
+        elif hasattr(Quotation, 'date'):
+            query = query.filter(
+                Quotation.date >= start_date,
+                Quotation.date <= end_date
+            )
+
+        # Ordering
+        if hasattr(Quotation, 'createdAt'):
+            query = query.order_by(desc(Quotation.createdAt))
+        elif hasattr(Quotation, 'date'):
+            query = query.order_by(desc(Quotation.date))
+
+        quotations = query.all()
+
+        result = []
+        for quote in quotations:
+            quote_dict = quote.to_dict() if hasattr(quote, 'to_dict') else {}
+
+            if 'items' not in quote_dict and hasattr(quote, 'items'):
+                quote_dict['items'] = [
+                    item.to_dict() if hasattr(item, 'to_dict') else {}
+                    for item in quote.items
+                ]
+
+            if hasattr(quote, 'createdAt') and quote.createdAt:
+                quote_dict['createdAt'] = quote.createdAt.isoformat()
+
+            result.append(quote_dict)
+
+        return jsonify({
+            "success": True,
+            "data": result,
+            "count": len(result),
+            "message": f"Found {len(result)} quotations"
+        }), 200
+
+    except ValueError as e:
+        return jsonify({
+            "success": False,
+            "message": f"Invalid date format: {str(e)}"
+        }), 400
+
+    except Exception as e:
+        print("Export error:", e)
+        return jsonify({
+            "success": False,
+            "message": f"Server error: {str(e)}"
+        }), 500

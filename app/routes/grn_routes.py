@@ -237,7 +237,8 @@ def save_grn_from_po():
                 unit=item.get("unit", "PCS"),
                 quantity=float(item.get("quantity", 0)),
                 buy_price=float(item.get("buy_price", 0)),
-                batch_code=batch_code
+                batch_code=batch_code,
+                status="active"  # Default status
             )
             
             db.session.add(new_grn)
@@ -246,7 +247,8 @@ def save_grn_from_po():
                 "batch_code": batch_code,
                 "brand": item.get("brand"),
                 "quantity": item.get("quantity"),
-                "buy_price": item.get("buy_price")
+                "buy_price": item.get("buy_price"),
+                "status": "active"
             })
         
         # Update PO status to indicate GRN created
@@ -270,12 +272,21 @@ def save_grn_from_po():
 
 
 # -------------------------------------------------------------------
-# GET ALL GRN RECORDS
+# GET ALL GRN RECORDS (with status filter)
 # -------------------------------------------------------------------
 @grn_bp.route("/all", methods=["GET"])
 def get_all_grn():
     try:
-        grn_list = GRN.query.order_by(GRN.created_on.desc()).all()
+        # Get status filter from query parameter
+        status_filter = request.args.get('status')
+        
+        # Build query with optional status filter
+        query = GRN.query
+        
+        if status_filter:
+            query = query.filter(GRN.status == status_filter)
+        
+        grn_list = query.order_by(GRN.created_on.desc()).all()
         
         result = []
         for g in grn_list:
@@ -283,7 +294,6 @@ def get_all_grn():
                 "id": g.id,
                 "po_number": g.po_number,
                 "invoice_number": g.invoice_number,
-                # FIX: invoice_date is a string, not a datetime
                 "invoice_date": g.invoice_date,
                 
                 # Company details
@@ -308,8 +318,10 @@ def get_all_grn():
                 "quantity": g.quantity,
                 "buy_price": float(g.buy_price) if g.buy_price else 0.0,
                 "batch_code": g.batch_code,
+                "status": g.status,
                 
-                "created_on": g.created_on.strftime("%Y-%m-%d %H:%M:%S") if g.created_on else None
+                "created_on": g.created_on.strftime("%Y-%m-%d %H:%M:%S") if g.created_on else None,
+                "updated_on": g.updated_on.strftime("%Y-%m-%d %H:%M:%S") if g.updated_on else None
             })
         
         return jsonify({"success": True, "count": len(result), "data": result})
@@ -340,7 +352,6 @@ def get_grn_by_invoice(invoice_number):
                 "id": g.id,
                 "po_number": g.po_number,
                 "invoice_number": g.invoice_number,
-                # FIX: invoice_date is a string
                 "invoice_date": g.invoice_date,
                 
                 # Company details
@@ -366,8 +377,10 @@ def get_grn_by_invoice(invoice_number):
                 "buy_price": float(g.buy_price) if g.buy_price else 0.0,
                 "item_total": item_total,
                 "batch_code": g.batch_code,
+                "status": g.status,
                 
-                "created_on": g.created_on.strftime("%Y-%m-%d %H:%M:%S") if g.created_on else None
+                "created_on": g.created_on.strftime("%Y-%m-%d %H:%M:%S") if g.created_on else None,
+                "updated_on": g.updated_on.strftime("%Y-%m-%d %H:%M:%S") if g.updated_on else None
             })
         
         return jsonify({
@@ -383,19 +396,29 @@ def get_grn_by_invoice(invoice_number):
 
 
 # -------------------------------------------------------------------
-# GET DISTINCT INVOICE NUMBERS
+# GET DISTINCT INVOICE NUMBERS (with status filter)
 # -------------------------------------------------------------------
 @grn_bp.route("/invoices", methods=["GET"])
 def get_invoice_numbers():
     try:
-        # Get distinct invoice numbers
-        invoices = db.session.query(
+        # Get status filter from query parameter
+        status_filter = request.args.get('status')
+        
+        # Build query
+        query = db.session.query(
             GRN.invoice_number,
             GRN.invoice_date,
             GRN.po_number,
             db.func.count(GRN.id).label('item_count'),
             db.func.sum(GRN.quantity * GRN.buy_price).label('total_amount')
-        ).group_by(
+        )
+        
+        # Apply status filter if provided
+        if status_filter:
+            query = query.filter(GRN.status == status_filter)
+        
+        # Execute query
+        invoices = query.group_by(
             GRN.invoice_number, 
             GRN.invoice_date, 
             GRN.po_number
@@ -403,18 +426,18 @@ def get_invoice_numbers():
         
         result = []
         for inv in invoices:
-            # Get company name from first item
+            # Get company name and status from first item
             first_item = GRN.query.filter_by(
                 invoice_number=inv.invoice_number
             ).first()
             
             result.append({
                 "invoice_number": inv.invoice_number,
-                # FIX: invoice_date is a string
                 "invoice_date": inv.invoice_date,
                 "po_number": inv.po_number,
                 "company_name": first_item.company_name if first_item else "",
                 "customer_name": first_item.customer_name if first_item else "",
+                "status": first_item.status if first_item else "active",
                 "item_count": inv.item_count,
                 "total_amount": float(inv.total_amount) if inv.total_amount else 0.0
             })
@@ -446,12 +469,19 @@ def update_grn_item(grn_id):
         update_fields = [
             'invoice_number', 'invoice_date', 'brand', 'brand_code', 
             'brand_description', 'length', 'width', 'buy_price', 
-            'batch_code', 'quantity', 'unit'
+            'batch_code', 'quantity', 'unit', 'status'
         ]
         
         for field in update_fields:
             if field in data:
                 setattr(grn_item, field, data[field])
+        
+        # Validate status
+        if 'status' in data and data['status'] not in ['active', 'cancelled', 'returned']:
+            return jsonify({
+                "success": False, 
+                "message": "Invalid status. Must be one of: active, cancelled, returned"
+            }), 400
         
         # Validate batch code uniqueness
         if 'batch_code' in data:
@@ -476,6 +506,9 @@ def update_grn_item(grn_id):
                     "message": "Invalid invoice date format. Use YYYY-MM-DD"
                 }), 400
         
+        # Update timestamp
+        grn_item.updated_on = datetime.utcnow()
+        
         db.session.commit()
         
         return jsonify({
@@ -487,6 +520,51 @@ def update_grn_item(grn_id):
     except Exception as e:
         db.session.rollback()
         print(f"Error updating GRN item: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# -------------------------------------------------------------------
+# UPDATE GRN STATUS (bulk update for invoice)
+# -------------------------------------------------------------------
+@grn_bp.route("/update-status/<string:invoice_number>", methods=["PUT"])
+def update_grn_status(invoice_number):
+    try:
+        data = request.get_json()
+        new_status = data.get('status')
+        
+        if not new_status:
+            return jsonify({"success": False, "message": "Status is required"}), 400
+        
+        if new_status not in ['active', 'cancelled', 'returned']:
+            return jsonify({
+                "success": False, 
+                "message": "Invalid status. Must be one of: active, cancelled, returned"
+            }), 400
+        
+        # Find all items with this invoice number
+        grn_items = GRN.query.filter_by(invoice_number=invoice_number).all()
+        
+        if not grn_items:
+            return jsonify({"success": False, "message": "Invoice not found"}), 404
+        
+        # Update all items
+        for item in grn_items:
+            item.status = new_status
+            item.updated_on = datetime.utcnow()
+        
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": f"Updated {len(grn_items)} items to status: {new_status}",
+            "invoice_number": invoice_number,
+            "status": new_status,
+            "items_updated": len(grn_items)
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error updating GRN status: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -532,23 +610,28 @@ def delete_grn_item(grn_id):
 
 
 # -------------------------------------------------------------------
-# GET GRN STATISTICS
+# GET GRN STATISTICS (with status breakdown)
 # -------------------------------------------------------------------
 @grn_bp.route("/stats", methods=["GET"])
 def get_grn_statistics():
     try:
-        # Total GRN records
+        # Total GRN records by status
         total_count = GRN.query.count()
+        
+        # Count by status
+        active_count = GRN.query.filter_by(status='active').count()
+        cancelled_count = GRN.query.filter_by(status='cancelled').count()
+        returned_count = GRN.query.filter_by(status='returned').count()
         
         # Total invoices
         invoice_count = db.session.query(
             db.func.count(db.func.distinct(GRN.invoice_number))
         ).scalar()
         
-        # Total amount
+        # Total amount (only active items)
         total_amount_result = db.session.query(
             db.func.sum(GRN.quantity * GRN.buy_price)
-        ).scalar()
+        ).filter_by(status='active').scalar()
         total_amount = float(total_amount_result) if total_amount_result else 0.0
         
         # Today's GRN
@@ -569,6 +652,11 @@ def get_grn_statistics():
             "success": True,
             "data": {
                 "total_grn_items": total_count,
+                "status_breakdown": {
+                    "active": active_count,
+                    "cancelled": cancelled_count,
+                    "returned": returned_count
+                },
                 "total_invoices": invoice_count,
                 "total_amount": total_amount,
                 "today_count": today_count,
@@ -582,18 +670,19 @@ def get_grn_statistics():
 
 
 # -------------------------------------------------------------------
-# SEARCH GRN
+# SEARCH GRN (with status filter)
 # -------------------------------------------------------------------
 @grn_bp.route("/search", methods=["GET"])
 def search_grn():
     try:
         search_term = request.args.get('q', '')
+        status_filter = request.args.get('status')
         
         if not search_term:
             return jsonify({"success": False, "message": "Search term required"}), 400
         
-        # Search in multiple fields
-        results = GRN.query.filter(
+        # Build query
+        query = GRN.query.filter(
             db.or_(
                 GRN.invoice_number.ilike(f'%{search_term}%'),
                 GRN.po_number.ilike(f'%{search_term}%'),
@@ -603,7 +692,13 @@ def search_grn():
                 GRN.batch_code.ilike(f'%{search_term}%'),
                 GRN.brand.ilike(f'%{search_term}%')
             )
-        ).order_by(GRN.created_on.desc()).limit(50).all()
+        )
+        
+        # Apply status filter if provided
+        if status_filter:
+            query = query.filter(GRN.status == status_filter)
+        
+        results = query.order_by(GRN.created_on.desc()).limit(50).all()
         
         result_data = []
         for g in results:
@@ -611,7 +706,7 @@ def search_grn():
                 "id": g.id,
                 "po_number": g.po_number,
                 "invoice_number": g.invoice_number,
-                "invoice_date": g.invoice_date,  # Already a string
+                "invoice_date": g.invoice_date,
                 "company_name": g.company_name,
                 "customer_name": g.customer_name,
                 "item_name": g.item_name,
@@ -619,7 +714,9 @@ def search_grn():
                 "batch_code": g.batch_code,
                 "quantity": g.quantity,
                 "buy_price": float(g.buy_price) if g.buy_price else 0.0,
-                "created_on": g.created_on.strftime("%Y-%m-%d") if g.created_on else None
+                "status": g.status,
+                "created_on": g.created_on.strftime("%Y-%m-%d") if g.created_on else None,
+                "updated_on": g.updated_on.strftime("%Y-%m-%d") if g.updated_on else None
             })
         
         return jsonify({
@@ -630,4 +727,84 @@ def search_grn():
         
     except Exception as e:
         print(f"Error searching GRN: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# -------------------------------------------------------------------
+# GET STATUS SUMMARY
+# -------------------------------------------------------------------
+@grn_bp.route("/status-summary", methods=["GET"])
+def get_status_summary():
+    try:
+        # Count items by status for each invoice
+        status_summary = db.session.query(
+            GRN.invoice_number,
+            GRN.status,
+            db.func.count(GRN.id).label('item_count')
+        ).group_by(
+            GRN.invoice_number,
+            GRN.status
+        ).all()
+        
+        result = {}
+        for summary in status_summary:
+            invoice = summary.invoice_number
+            status = summary.status
+            count = summary.item_count
+            
+            if invoice not in result:
+                result[invoice] = {}
+            
+            result[invoice][status] = count
+        
+        return jsonify({
+            "success": True,
+            "data": result
+        })
+        
+    except Exception as e:
+        print(f"Error getting status summary: {str(e)}")
+        return jsonify({"success": False, "error": str(e)}), 500
+    # -------------------------------------------------------------------
+# UPDATE GRN STATUS (BULK UPDATE BY IDs)
+# -------------------------------------------------------------------
+@grn_bp.route("/update-status-bulk", methods=["PUT"])
+def update_grn_status_bulk():
+    try:
+        data = request.get_json()
+        grn_ids = data.get('grn_ids', [])
+        new_status = data.get('status')
+        
+        if not grn_ids:
+            return jsonify({"success": False, "message": "No GRN IDs provided"}), 400
+        
+        if not new_status:
+            return jsonify({"success": False, "message": "Status is required"}), 400
+        
+        if new_status not in ['active', 'cancelled', 'returned', 'done']:
+            return jsonify({
+                "success": False, 
+                "message": "Invalid status. Must be one of: active, cancelled, returned, done"
+            }), 400
+        
+        # Update all items with given IDs
+        updated_count = 0
+        for grn_id in grn_ids:
+            grn_item = GRN.query.get(grn_id)
+            if grn_item:
+                grn_item.status = new_status
+                grn_item.updated_on = datetime.utcnow()
+                updated_count += 1
+        
+        db.session.commit()
+        
+        return jsonify({
+            "success": True,
+            "message": f"Updated {updated_count} GRN items to status: {new_status}",
+            "updated_count": updated_count
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error updating GRN status in bulk: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
