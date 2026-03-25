@@ -38,6 +38,7 @@ class PurchaseOrder(db.Model):
     rejected_date = db.Column(db.DateTime, nullable=True)
 
     items = db.Column(JSON, nullable=False)
+    received_items = db.Column(JSON, nullable=True)  # Track received quantities
     total_amount = db.Column(db.Float, nullable=False, default=0.0)
 
     created_on = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
@@ -86,6 +87,7 @@ class PurchaseOrder(db.Model):
         self.approval_remarks = approval_remarks
         self.rejection_remarks = rejection_remarks
         self.items = items
+        self.received_items = []
         self.total_amount = total_amount
 
     def to_dict(self):
@@ -110,6 +112,7 @@ class PurchaseOrder(db.Model):
             'approved_date': self.approved_date.isoformat() if self.approved_date else None,
             'rejected_date': self.rejected_date.isoformat() if self.rejected_date else None,
             'items': self.items,
+            'received_items': self.received_items or [],
             'total_amount': float(self.total_amount) if self.total_amount else 0.0,
             'created_on': self.created_on.isoformat() if self.created_on else None,
             'updated_on': self.updated_on.isoformat() if self.updated_on else None

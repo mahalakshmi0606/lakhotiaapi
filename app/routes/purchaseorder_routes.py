@@ -336,3 +336,142 @@ def get_po_statistics():
     except Exception as e:
         print(f"Error getting statistics: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
+    
+    # ---------------------------
+# Get Approved POs (Not Completed)
+# ---------------------------
+@purchase_order_bp.route('/approved-not-completed', methods=['GET'])
+def get_approved_not_completed():
+    try:
+        # Get all approved POs that are not completed
+        purchase_orders = PurchaseOrder.query.filter(
+            PurchaseOrder.status == 'approved'
+        ).order_by(PurchaseOrder.created_on.desc()).all()
+        
+        return jsonify({
+            'success': True,
+            'count': len(purchase_orders),
+            'data': [po.to_dict() for po in purchase_orders]
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting approved POs: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Receive Items (Partial or Full)
+# ---------------------------
+@purchase_order_bp.route('/receive-items/<int:po_id>', methods=['POST'])
+def receive_items(po_id):
+    try:
+        data = request.get_json() or {}
+        received_quantities = data.get('received_quantities', [])  # List of items with received quantity
+        
+        purchase_order = PurchaseOrder.query.get(po_id)
+        if not purchase_order:
+            return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
+        
+        # Check if PO is approved
+        if purchase_order.status != 'approved':
+            return jsonify({
+                'success': False,
+                'error': f'Cannot receive items for PO with status {purchase_order.status}'
+            }), 400
+        
+        # Initialize received_items if not exists
+        if not purchase_order.received_items:
+            # Initialize received_items array with zeros for each item
+            purchase_order.received_items = []
+            for item in purchase_order.items:
+                purchase_order.received_items.append({
+                    'item_index': len(purchase_order.received_items),
+                    'item_name': item.get('item_name'),
+                    'ordered_quantity': item.get('quantity', 0),
+                    'received_quantity': 0,
+                    'pending_quantity': item.get('quantity', 0),
+                    'last_received_date': None,
+                    'receipt_history': []
+                })
+        
+        # Update received quantities
+        for received_item in received_quantities:
+            item_index = received_item.get('item_index')
+            received_qty = float(received_item.get('received_quantity', 0))
+            
+            if item_index is not None and item_index < len(purchase_order.received_items):
+                current_received = purchase_order.received_items[item_index].get('received_quantity', 0)
+                ordered_qty = purchase_order.received_items[item_index].get('ordered_quantity', 0)
+                
+                # Check if received quantity exceeds ordered quantity
+                if current_received + received_qty > ordered_qty:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Received quantity exceeds ordered quantity for item {item_index + 1}'
+                    }), 400
+                
+                # Update received quantity
+                new_received = current_received + received_qty
+                purchase_order.received_items[item_index]['received_quantity'] = new_received
+                purchase_order.received_items[item_index]['pending_quantity'] = ordered_qty - new_received
+                
+                # Add to receipt history
+                if not purchase_order.received_items[item_index].get('receipt_history'):
+                    purchase_order.received_items[item_index]['receipt_history'] = []
+                
+                purchase_order.received_items[item_index]['receipt_history'].append({
+                    'date': datetime.utcnow().isoformat(),
+                    'quantity': received_qty,
+                    'remarks': received_item.get('remarks', '')
+                })
+                
+                purchase_order.received_items[item_index]['last_received_date'] = datetime.utcnow().isoformat()
+        
+        # Check if all items are fully received
+        all_received = all(
+            item.get('pending_quantity', 0) == 0 
+            for item in purchase_order.received_items
+        )
+        
+        # Update status if all items received
+        if all_received and purchase_order.status == 'approved':
+            purchase_order.status = 'completed'
+            purchase_order.delivery_date = datetime.utcnow().date()
+        
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': 'Items received successfully',
+            'data': purchase_order.to_dict()
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error receiving items: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Get Receipt History for a PO
+# ---------------------------
+@purchase_order_bp.route('/receipt-history/<int:po_id>', methods=['GET'])
+def get_receipt_history(po_id):
+    try:
+        purchase_order = PurchaseOrder.query.get(po_id)
+        if not purchase_order:
+            return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'po_number': purchase_order.po_number,
+                'received_items': purchase_order.received_items or [],
+                'items': purchase_order.items,
+                'status': purchase_order.status
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting receipt history: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500

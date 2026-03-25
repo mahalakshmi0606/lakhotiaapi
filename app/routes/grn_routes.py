@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify
 from datetime import datetime
+from sqlalchemy import func, and_, or_
 from app import db
 from app.models.grn import GRN
 from app.models.purchaseorder import PurchaseOrder
@@ -8,7 +9,204 @@ grn_bp = Blueprint("grn_bp", __name__, url_prefix="/api/grn")
 
 
 # -------------------------------------------------------------------
-# GET COMPLETED PURCHASE ORDERS
+# GET ALL POs WITH DELIVERY STATUS (Completed & Partially Delivered)
+# -------------------------------------------------------------------
+@grn_bp.route("/all-pos-with-status", methods=["GET"])
+def get_all_pos_with_status():
+    try:
+        # Get all completed POs
+        all_pos = PurchaseOrder.query.filter(
+            PurchaseOrder.status == 'completed'
+        ).order_by(PurchaseOrder.created_on.desc()).all()
+        
+        # Get all partial deliveries from GRN
+        partial_deliveries = db.session.query(
+            GRN.po_number,
+            GRN.item_name,
+            func.sum(GRN.quantity).label('total_delivered')
+        ).filter(
+            GRN.status == 'active'
+        ).group_by(GRN.po_number, GRN.item_name).all()
+        
+        # Create delivery tracking dict
+        delivery_tracking = {}
+        for delivery in partial_deliveries:
+            if delivery.po_number not in delivery_tracking:
+                delivery_tracking[delivery.po_number] = {}
+            delivery_tracking[delivery.po_number][delivery.item_name] = delivery.total_delivered
+        
+        completed_pos = []
+        partial_pos = []
+        
+        for po in all_pos:
+            po_dict = po.to_dict()
+            items = po.items if po.items else []
+            
+            # Calculate delivery status for each PO
+            total_items = len(items)
+            delivered_items = 0
+            total_delivered_qty = 0
+            total_ordered_qty = 0
+            
+            # Track if all items are fully delivered
+            all_items_fully_delivered = True
+            po_delivery_tracking = delivery_tracking.get(po.po_number, {})
+            
+            for item in items:
+                item_name = item.get('item_name')
+                ordered_qty = item.get('quantity', 0)
+                delivered_qty = po_delivery_tracking.get(item_name, 0)
+                
+                total_ordered_qty += ordered_qty
+                total_delivered_qty += min(delivered_qty, ordered_qty)
+                
+                if delivered_qty >= ordered_qty:
+                    delivered_items += 1
+                else:
+                    all_items_fully_delivered = False
+            
+            # Check if GRN already exists
+            existing_grn = GRN.query.filter_by(po_number=po.po_number).first()
+            po_dict['has_grn'] = existing_grn is not None
+            po_dict['grn_invoice'] = existing_grn.invoice_number if existing_grn else None
+            
+            if all_items_fully_delivered:
+                # Fully delivered PO
+                po_dict['delivery_status'] = 'completed'
+                po_dict['delivered_percent'] = 100
+                po_dict['delivered_items'] = total_items
+                po_dict['total_items'] = total_items
+                completed_pos.append(po_dict)
+            else:
+                # Partially delivered PO
+                delivered_percent = (total_delivered_qty / total_ordered_qty * 100) if total_ordered_qty > 0 else 0
+                po_dict['delivery_status'] = 'partial'
+                po_dict['delivered_percent'] = round(delivered_percent, 1)
+                po_dict['delivered_items'] = delivered_items
+                po_dict['total_items'] = total_items
+                po_dict['delivered_quantity'] = total_delivered_qty
+                po_dict['total_quantity'] = total_ordered_qty
+                partial_pos.append(po_dict)
+        
+        return jsonify({
+            'success': True,
+            'data': {
+                'completed': completed_pos,
+                'partial': partial_pos
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching POs with status: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# -------------------------------------------------------------------
+# GET POs READY FOR GRN (Approved & Partially Received)
+# -------------------------------------------------------------------
+@grn_bp.route("/ready-for-grn", methods=["GET"])
+def get_pos_ready_for_grn():
+    try:
+        # Get both approved and partially_received POs
+        purchase_orders = PurchaseOrder.query.filter(
+            PurchaseOrder.status.in_(['approved', 'partially_received'])
+        ).order_by(PurchaseOrder.created_on.desc()).all()
+        
+        # Get GRN deliveries to calculate remaining quantities
+        result = []
+        for po in purchase_orders:
+            po_dict = po.to_dict()
+            
+            # Get all GRN deliveries for this PO
+            deliveries = GRN.query.filter_by(po_number=po.po_number).all()
+            
+            # Calculate delivered quantities per item
+            delivered_quantities = {}
+            for delivery in deliveries:
+                if delivery.item_name not in delivered_quantities:
+                    delivered_quantities[delivery.item_name] = 0
+                delivered_quantities[delivery.item_name] += delivery.quantity
+            
+            # Calculate remaining quantities for each item
+            remaining_items = []
+            total_remaining = 0
+            for item in po.items:
+                item_name = item.get('item_name')
+                ordered_qty = item.get('quantity', 0)
+                delivered_qty = delivered_quantities.get(item_name, 0)
+                remaining_qty = max(0, ordered_qty - delivered_qty)
+                
+                if remaining_qty > 0:
+                    remaining_items.append({
+                        **item,
+                        'remaining_quantity': remaining_qty,
+                        'delivered_quantity': delivered_qty,
+                        'ordered_quantity': ordered_qty
+                    })
+                    total_remaining += remaining_qty * item.get('buy_price', 0)
+            
+            po_dict['remaining_items'] = remaining_items
+            po_dict['remaining_amount'] = total_remaining
+            po_dict['delivery_status'] = 'partial' if po.status == 'partially_received' else 'pending'
+            
+            # Check if there are remaining items to deliver
+            if remaining_items:
+                result.append(po_dict)
+        
+        return jsonify({
+            'success': True,
+            'count': len(result),
+            'data': result
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting POs ready for GRN: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# -------------------------------------------------------------------
+# GET PARTIAL DELIVERIES SUMMARY
+# -------------------------------------------------------------------
+@grn_bp.route("/partial-deliveries", methods=["GET"])
+def get_partial_deliveries():
+    try:
+        # Get all partial deliveries (items with remaining quantity)
+        partial_deliveries = db.session.query(
+            GRN.po_number,
+            GRN.item_name,
+            func.sum(GRN.quantity).label('total_delivered')
+        ).filter(
+            GRN.status == 'active'
+        ).group_by(GRN.po_number, GRN.item_name).all()
+        
+        result = []
+        for delivery in partial_deliveries:
+            # Get PO to find original quantity
+            po = PurchaseOrder.query.filter_by(po_number=delivery.po_number).first()
+            if po and po.items:
+                for item in po.items:
+                    if item.get('item_name') == delivery.item_name:
+                        result.append({
+                            'po_number': delivery.po_number,
+                            'item_name': delivery.item_name,
+                            'delivered_quantity': delivery.total_delivered,
+                            'ordered_quantity': item.get('quantity', 0),
+                            'remaining_quantity': max(0, item.get('quantity', 0) - delivery.total_delivered)
+                        })
+                        break
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching partial deliveries: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# -------------------------------------------------------------------
+# GET COMPLETED PURCHASE ORDERS (Legacy - kept for compatibility)
 # -------------------------------------------------------------------
 @grn_bp.route("/completed-po", methods=["GET"])
 def get_completed_po():
@@ -18,15 +216,45 @@ def get_completed_po():
             PurchaseOrder.status == 'completed'
         ).order_by(PurchaseOrder.created_on.desc()).all()
         
+        # Get partial deliveries to check if PO is fully delivered
+        partial_deliveries = db.session.query(
+            GRN.po_number,
+            GRN.item_name,
+            func.sum(GRN.quantity).label('total_delivered')
+        ).filter(
+            GRN.status == 'active'
+        ).group_by(GRN.po_number, GRN.item_name).all()
+        
+        delivery_tracking = {}
+        for delivery in partial_deliveries:
+            if delivery.po_number not in delivery_tracking:
+                delivery_tracking[delivery.po_number] = {}
+            delivery_tracking[delivery.po_number][delivery.item_name] = delivery.total_delivered
+        
         # Format the data
         orders_data = []
         for po in completed_orders:
             po_dict = po.to_dict()
-            # Check if GRN already exists for this PO
-            existing_grn = GRN.query.filter_by(po_number=po.po_number).first()
-            po_dict['has_grn'] = existing_grn is not None
-            po_dict['grn_invoice'] = existing_grn.invoice_number if existing_grn else None
-            orders_data.append(po_dict)
+            
+            # Check if all items are fully delivered
+            items = po.items if po.items else []
+            all_delivered = True
+            
+            for item in items:
+                item_name = item.get('item_name')
+                ordered_qty = item.get('quantity', 0)
+                delivered_qty = delivery_tracking.get(po.po_number, {}).get(item_name, 0)
+                
+                if delivered_qty < ordered_qty:
+                    all_delivered = False
+                    break
+            
+            # Only include fully delivered POs
+            if all_delivered:
+                existing_grn = GRN.query.filter_by(po_number=po.po_number).first()
+                po_dict['has_grn'] = existing_grn is not None
+                po_dict['grn_invoice'] = existing_grn.invoice_number if existing_grn else None
+                orders_data.append(po_dict)
         
         return jsonify({
             'success': True,
@@ -40,7 +268,7 @@ def get_completed_po():
 
 
 # -------------------------------------------------------------------
-# GET PURCHASE ORDER DETAILS BY PO NUMBER
+# GET PURCHASE ORDER DETAILS BY PO NUMBER (With Delivery Info)
 # -------------------------------------------------------------------
 @grn_bp.route("/get-po/<string:po_number>", methods=["GET"])
 def get_purchase_order_details(po_number):
@@ -51,19 +279,51 @@ def get_purchase_order_details(po_number):
         if not po:
             return jsonify({"success": False, "message": "Purchase Order not found"}), 404
         
-        # Check if PO is completed
-        if po.status != 'completed':
+        # Check if PO is approved or partially received
+        if po.status not in ['approved', 'partially_received']:
             return jsonify({
                 "success": False, 
-                "message": f"Purchase Order status is '{po.status}', only completed POs can be converted to GRN"
+                "message": f"Purchase Order status is '{po.status}', only approved or partially received POs can be converted to GRN"
             }), 400
         
-        # Check if GRN already exists
-        existing_grn = GRN.query.filter_by(po_number=po_number).first()
-        if existing_grn:
+        # Get existing deliveries for this PO
+        existing_deliveries = GRN.query.filter_by(po_number=po_number).all()
+        
+        # Calculate delivered quantities per item
+        delivered_quantities = {}
+        for delivery in existing_deliveries:
+            if delivery.item_name not in delivered_quantities:
+                delivered_quantities[delivery.item_name] = 0
+            delivered_quantities[delivery.item_name] += delivery.quantity
+        
+        # Check if PO already has any deliveries (partial or full)
+        has_deliveries = len(existing_deliveries) > 0
+        is_fully_delivered = True
+        
+        # Enhance items with delivery information
+        enhanced_items = []
+        for item in po.items:
+            item_name = item.get('item_name')
+            ordered_qty = item.get('quantity', 0)
+            delivered_qty = delivered_quantities.get(item_name, 0)
+            remaining_qty = ordered_qty - delivered_qty
+            
+            if remaining_qty > 0:
+                is_fully_delivered = False
+            
+            enhanced_item = {
+                **item,
+                'original_quantity': ordered_qty,
+                'delivered_quantity': delivered_qty,
+                'remaining_quantity': remaining_qty
+            }
+            enhanced_items.append(enhanced_item)
+        
+        # Check if PO is fully delivered
+        if is_fully_delivered and has_deliveries:
             return jsonify({
                 "success": False, 
-                "message": f"GRN already exists for this PO (Invoice: {existing_grn.invoice_number})"
+                "message": f"PO {po_number} is already fully delivered. No items remaining."
             }), 400
         
         return jsonify({
@@ -80,9 +340,12 @@ def get_purchase_order_details(po_number):
                 "gst_number": po.gst_number,
                 "supplier_part_no": po.supplier_part_no,
                 "supplier_description": po.supplier_description,
-                "items": po.items if po.items else [],
+                "items": enhanced_items,
                 "total_amount": float(po.total_amount) if po.total_amount else 0.0,
-                "status": po.status
+                "status": po.status,
+                "has_partial_deliveries": has_deliveries,
+                "is_fully_delivered": is_fully_delivered,
+                "delivery_status": 'partial' if has_deliveries and not is_fully_delivered else 'pending'
             }
         })
         
@@ -123,7 +386,7 @@ def generate_invoice_number():
 # -------------------------------------------------------------------
 def generate_batch_code(brand, po_number, date_str=None):
     if not brand:
-        brand = "UNK"
+        brand = "GEN"
     
     brand_code = brand[:3].upper()
     today = datetime.now()
@@ -141,7 +404,7 @@ def generate_batch_code(brand, po_number, date_str=None):
 
 
 # -------------------------------------------------------------------
-# SAVE **MULTIPLE** GRN ITEMS FROM PURCHASE ORDER
+# SAVE GRN ITEMS FROM PURCHASE ORDER (Supports Partial Delivery)
 # -------------------------------------------------------------------
 @grn_bp.route("/save-from-po", methods=["POST"])
 def save_grn_from_po():
@@ -151,6 +414,8 @@ def save_grn_from_po():
         # Required fields
         po_number = data.get("po_number")
         items = data.get("items", [])
+        is_partial = data.get("is_partial", False)
+        remaining_items = data.get("remaining_items", False)
         
         if not po_number:
             return jsonify({"success": False, "message": "PO Number is required"}), 400
@@ -163,20 +428,42 @@ def save_grn_from_po():
         if not po:
             return jsonify({"success": False, "message": "Purchase Order not found"}), 404
         
-        # Check if PO is completed
-        if po.status != 'completed':
+        # Check if PO is approved or partially received
+        if po.status not in ['approved', 'partially_received']:
             return jsonify({
                 "success": False, 
-                "message": f"Cannot create GRN for PO with status '{po.status}', only completed POs allowed"
+                "message": f"Cannot create GRN for PO with status '{po.status}', only approved or partially received POs allowed"
             }), 400
         
-        # Check if GRN already exists for this PO
-        existing_grn = GRN.query.filter_by(po_number=po_number).first()
-        if existing_grn:
-            return jsonify({
-                "success": False, 
-                "message": f"GRN already exists for this PO (Invoice: {existing_grn.invoice_number})"
-            }), 400
+        # Get existing deliveries for this PO
+        existing_deliveries = GRN.query.filter_by(po_number=po_number).all()
+        existing_delivery_items = {}
+        for delivery in existing_deliveries:
+            if delivery.item_name not in existing_delivery_items:
+                existing_delivery_items[delivery.item_name] = 0
+            existing_delivery_items[delivery.item_name] += delivery.quantity
+        
+        # Check if we're exceeding ordered quantities
+        for item in items:
+            item_name = item.get('item_name')
+            ordered_qty = None
+            
+            # Find original ordered quantity
+            for po_item in po.items:
+                if po_item.get('item_name') == item_name:
+                    ordered_qty = po_item.get('quantity', 0)
+                    break
+            
+            if ordered_qty is not None:
+                delivered_qty = existing_delivery_items.get(item_name, 0)
+                new_delivery_qty = item.get('quantity', 0)
+                total_delivered = delivered_qty + new_delivery_qty
+                
+                if total_delivered > ordered_qty:
+                    return jsonify({
+                        "success": False, 
+                        "message": f"Quantity exceeded for {item_name}. Ordered: {ordered_qty}, Already delivered: {delivered_qty}, Trying to deliver: {new_delivery_qty}"
+                    }), 400
         
         # Validate batch codes are unique
         batch_codes = [item.get('batch_code') for item in items if item.get('batch_code')]
@@ -189,7 +476,7 @@ def save_grn_from_po():
         # Generate invoice number
         invoice_number = generate_invoice_number()
         today_date = datetime.now().date()
-        invoice_date_str = today_date.strftime("%Y-%m-%d")  # Store as string
+        invoice_date_str = today_date.strftime("%Y-%m-%d")
         
         # Save each item
         saved_items = []
@@ -214,7 +501,7 @@ def save_grn_from_po():
             new_grn = GRN(
                 po_number=po_number,
                 invoice_number=invoice_number,
-                invoice_date=invoice_date_str,  # Store as string
+                invoice_date=invoice_date_str,
                 
                 # Company details from PO
                 company_name=po.company_name,
@@ -238,7 +525,8 @@ def save_grn_from_po():
                 quantity=float(item.get("quantity", 0)),
                 buy_price=float(item.get("buy_price", 0)),
                 batch_code=batch_code,
-                status="active"  # Default status
+                status="active",
+                is_partial=is_partial
             )
             
             db.session.add(new_grn)
@@ -251,8 +539,13 @@ def save_grn_from_po():
                 "status": "active"
             })
         
-        # Update PO status to indicate GRN created
-        po.status = 'converted_to_grn'
+        # Update PO status based on remaining items
+        if not remaining_items:
+            # No remaining items, PO is fully delivered
+            po.status = 'converted_to_grn'
+        else:
+            # There are remaining items, PO is partially received
+            po.status = 'partially_received'
         
         db.session.commit()
         
@@ -262,7 +555,9 @@ def save_grn_from_po():
             "invoice_number": invoice_number,
             "invoice_date": invoice_date_str,
             "items_count": len(saved_items),
-            "items": saved_items
+            "items": saved_items,
+            "is_partial": is_partial,
+            "remaining_items": remaining_items
         })
         
     except Exception as e:
@@ -319,6 +614,7 @@ def get_all_grn():
                 "buy_price": float(g.buy_price) if g.buy_price else 0.0,
                 "batch_code": g.batch_code,
                 "status": g.status,
+                "is_partial": getattr(g, 'is_partial', False),
                 
                 "created_on": g.created_on.strftime("%Y-%m-%d %H:%M:%S") if g.created_on else None,
                 "updated_on": g.updated_on.strftime("%Y-%m-%d %H:%M:%S") if g.updated_on else None
@@ -378,6 +674,7 @@ def get_grn_by_invoice(invoice_number):
                 "item_total": item_total,
                 "batch_code": g.batch_code,
                 "status": g.status,
+                "is_partial": getattr(g, 'is_partial', False),
                 
                 "created_on": g.created_on.strftime("%Y-%m-%d %H:%M:%S") if g.created_on else None,
                 "updated_on": g.updated_on.strftime("%Y-%m-%d %H:%M:%S") if g.updated_on else None
@@ -409,8 +706,8 @@ def get_invoice_numbers():
             GRN.invoice_number,
             GRN.invoice_date,
             GRN.po_number,
-            db.func.count(GRN.id).label('item_count'),
-            db.func.sum(GRN.quantity * GRN.buy_price).label('total_amount')
+            func.count(GRN.id).label('item_count'),
+            func.sum(GRN.quantity * GRN.buy_price).label('total_amount')
         )
         
         # Apply status filter if provided
@@ -431,6 +728,10 @@ def get_invoice_numbers():
                 invoice_number=inv.invoice_number
             ).first()
             
+            # Check if this is a partial invoice
+            is_partial = any(getattr(item, 'is_partial', False) for item in 
+                            GRN.query.filter_by(invoice_number=inv.invoice_number).all())
+            
             result.append({
                 "invoice_number": inv.invoice_number,
                 "invoice_date": inv.invoice_date,
@@ -439,7 +740,8 @@ def get_invoice_numbers():
                 "customer_name": first_item.customer_name if first_item else "",
                 "status": first_item.status if first_item else "active",
                 "item_count": inv.item_count,
-                "total_amount": float(inv.total_amount) if inv.total_amount else 0.0
+                "total_amount": float(inv.total_amount) if inv.total_amount else 0.0,
+                "is_partial": is_partial
             })
         
         return jsonify({
@@ -469,7 +771,7 @@ def update_grn_item(grn_id):
         update_fields = [
             'invoice_number', 'invoice_date', 'brand', 'brand_code', 
             'brand_description', 'length', 'width', 'buy_price', 
-            'batch_code', 'quantity', 'unit', 'status'
+            'batch_code', 'quantity', 'unit', 'status', 'is_partial'
         ]
         
         for field in update_fields:
@@ -495,10 +797,30 @@ def update_grn_item(grn_id):
                     "message": f"Batch code '{data['batch_code']}' already exists"
                 }), 400
         
+        # Validate quantity doesn't exceed PO ordered quantity
+        if 'quantity' in data:
+            po = PurchaseOrder.query.filter_by(po_number=grn_item.po_number).first()
+            if po and po.items:
+                for item in po.items:
+                    if item.get('item_name') == grn_item.item_name:
+                        ordered_qty = item.get('quantity', 0)
+                        # Get total delivered excluding current item
+                        total_delivered = GRN.query.filter(
+                            GRN.po_number == grn_item.po_number,
+                            GRN.item_name == grn_item.item_name,
+                            GRN.id != grn_id
+                        ).with_entities(func.sum(GRN.quantity)).scalar() or 0
+                        
+                        if total_delivered + data['quantity'] > ordered_qty:
+                            return jsonify({
+                                "success": False,
+                                "message": f"Quantity would exceed ordered quantity. Ordered: {ordered_qty}, Already delivered: {total_delivered}, New quantity: {data['quantity']}"
+                            }), 400
+                        break
+        
         # Validate invoice date format if provided
         if 'invoice_date' in data:
             try:
-                # Try to parse to ensure it's a valid date
                 datetime.strptime(data['invoice_date'], '%Y-%m-%d')
             except ValueError:
                 return jsonify({
@@ -623,29 +945,32 @@ def get_grn_statistics():
         cancelled_count = GRN.query.filter_by(status='cancelled').count()
         returned_count = GRN.query.filter_by(status='returned').count()
         
+        # Count partial deliveries
+        partial_count = GRN.query.filter_by(is_partial=True).count() if hasattr(GRN, 'is_partial') else 0
+        
         # Total invoices
         invoice_count = db.session.query(
-            db.func.count(db.func.distinct(GRN.invoice_number))
+            func.count(func.distinct(GRN.invoice_number))
         ).scalar()
         
         # Total amount (only active items)
         total_amount_result = db.session.query(
-            db.func.sum(GRN.quantity * GRN.buy_price)
+            func.sum(GRN.quantity * GRN.buy_price)
         ).filter_by(status='active').scalar()
         total_amount = float(total_amount_result) if total_amount_result else 0.0
         
         # Today's GRN
         today = datetime.now().date()
         today_count = GRN.query.filter(
-            db.func.date(GRN.created_on) == today
+            func.date(GRN.created_on) == today
         ).count()
         
         # This month's GRN
         current_month = datetime.now().month
         current_year = datetime.now().year
         month_count = GRN.query.filter(
-            db.extract('month', GRN.created_on) == current_month,
-            db.extract('year', GRN.created_on) == current_year
+            func.extract('month', GRN.created_on) == current_month,
+            func.extract('year', GRN.created_on) == current_year
         ).count()
         
         return jsonify({
@@ -657,6 +982,7 @@ def get_grn_statistics():
                     "cancelled": cancelled_count,
                     "returned": returned_count
                 },
+                "partial_deliveries": partial_count,
                 "total_invoices": invoice_count,
                 "total_amount": total_amount,
                 "today_count": today_count,
@@ -683,7 +1009,7 @@ def search_grn():
         
         # Build query
         query = GRN.query.filter(
-            db.or_(
+            or_(
                 GRN.invoice_number.ilike(f'%{search_term}%'),
                 GRN.po_number.ilike(f'%{search_term}%'),
                 GRN.company_name.ilike(f'%{search_term}%'),
@@ -715,6 +1041,7 @@ def search_grn():
                 "quantity": g.quantity,
                 "buy_price": float(g.buy_price) if g.buy_price else 0.0,
                 "status": g.status,
+                "is_partial": getattr(g, 'is_partial', False),
                 "created_on": g.created_on.strftime("%Y-%m-%d") if g.created_on else None,
                 "updated_on": g.updated_on.strftime("%Y-%m-%d") if g.updated_on else None
             })
@@ -740,7 +1067,7 @@ def get_status_summary():
         status_summary = db.session.query(
             GRN.invoice_number,
             GRN.status,
-            db.func.count(GRN.id).label('item_count')
+            func.count(GRN.id).label('item_count')
         ).group_by(
             GRN.invoice_number,
             GRN.status
@@ -765,7 +1092,9 @@ def get_status_summary():
     except Exception as e:
         print(f"Error getting status summary: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
-    # -------------------------------------------------------------------
+
+
+# -------------------------------------------------------------------
 # UPDATE GRN STATUS (BULK UPDATE BY IDs)
 # -------------------------------------------------------------------
 @grn_bp.route("/update-status-bulk", methods=["PUT"])
