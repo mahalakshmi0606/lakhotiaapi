@@ -86,7 +86,7 @@ class Enquiry(db.Model):
     company_name = db.Column(db.String(200), nullable=False)
     company_address = db.Column(db.Text)
     company_pincode = db.Column(db.String(10))
-    company_gstin = db.Column(db.String(15))
+    company_gstin = db.Column(db.String(20))
 
     # Contact
     contact_person = db.Column(db.String(100))
