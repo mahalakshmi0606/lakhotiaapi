@@ -16,7 +16,7 @@ class VisitReport(db.Model):
     notes = db.Column(db.Text)
     attachment = db.Column(db.String(200))
     created_by = db.Column(db.String(100), default="Admin")
-    created_at = db.Column(db.DateTime, default=datetime.now)
+    created_at = db.Column(db.DateTime, default=datetime.now) 
 
     def to_dict(self):
         return {
