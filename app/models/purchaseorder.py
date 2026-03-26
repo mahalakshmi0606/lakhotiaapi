@@ -38,7 +38,7 @@ class PurchaseOrder(db.Model):
     rejected_date = db.Column(db.DateTime, nullable=True)
 
     items = db.Column(JSON, nullable=False)
-    received_items = db.Column(JSON, nullable=True)  # Track received quantities
+    received_items = db.Column(JSON, default=list, nullable=True)  # Track received quantities
     total_amount = db.Column(db.Float, nullable=False, default=0.0)
 
     created_on = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
@@ -68,7 +68,8 @@ class PurchaseOrder(db.Model):
         delivery_date=None,
         status='pending',
         approval_remarks=None,
-        rejection_remarks=None
+        rejection_remarks=None,
+        received_items=None
     ):
         self.po_number = po_number
         self.po_date = po_date
@@ -87,10 +88,43 @@ class PurchaseOrder(db.Model):
         self.approval_remarks = approval_remarks
         self.rejection_remarks = rejection_remarks
         self.items = items
-        self.received_items = []
+        self.received_items = received_items if received_items is not None else []
         self.total_amount = total_amount
 
     def to_dict(self):
+        # Calculate delivery status based on received items
+        delivery_status = 'new'
+        if self.received_items:
+            total_items = len(self.items)
+            received_items_count = len([r for r in self.received_items if r.get('received_quantity', 0) > 0])
+            if 0 < received_items_count < total_items:
+                delivery_status = 'partial'
+            elif received_items_count == total_items:
+                delivery_status = 'completed'
+        
+        # Add delivered and remaining quantities to items
+        items_with_delivery = []
+        if self.items:
+            for idx, item in enumerate(self.items):
+                item_copy = item.copy()
+                # Find received quantity for this item
+                received_qty = 0
+                if self.received_items:
+                    for received in self.received_items:
+                        if received.get('item_index') == idx:
+                            received_qty = received.get('received_quantity', 0)
+                            break
+                item_copy['delivered_quantity'] = received_qty
+                item_copy['remaining_quantity'] = item.get('quantity', 0) - received_qty
+                item_copy['original_quantity'] = item.get('quantity', 0)
+                items_with_delivery.append(item_copy)
+        
+        # Calculate remaining items (only those with remaining quantity > 0)
+        remaining_items = [
+            item for item in items_with_delivery 
+            if item.get('remaining_quantity', 0) > 0
+        ]
+        
         return {
             'id': self.id,
             'po_number': self.po_number,
@@ -111,9 +145,11 @@ class PurchaseOrder(db.Model):
             'rejection_remarks': self.rejection_remarks,
             'approved_date': self.approved_date.isoformat() if self.approved_date else None,
             'rejected_date': self.rejected_date.isoformat() if self.rejected_date else None,
-            'items': self.items,
+            'items': items_with_delivery,
+            'remaining_items': remaining_items,
             'received_items': self.received_items or [],
             'total_amount': float(self.total_amount) if self.total_amount else 0.0,
+            'delivery_status': delivery_status,
             'created_on': self.created_on.isoformat() if self.created_on else None,
             'updated_on': self.updated_on.isoformat() if self.updated_on else None
         }

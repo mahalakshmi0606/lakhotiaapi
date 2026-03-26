@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify
 from app import db
 from app.models.stock import Stock
 from flask_cors import CORS
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 
 stock_bp = Blueprint("stock_bp", __name__, url_prefix="/api/stock")
 CORS(stock_bp)
@@ -66,6 +66,89 @@ def search_stock():
 
 
 # -------------------------------------------------------
+# CHECK BATCH UNIQUE ENDPOINT - FIXED to properly handle different batch codes
+# -------------------------------------------------------
+@stock_bp.route("/check-batch-unique", methods=["POST", "OPTIONS"])
+def check_batch_unique():
+    """Check which item+batch combinations already exist in stock.
+    IMPORTANT: Items with different batch codes are ALWAYS considered unique,
+    even if other fields match."""
+    if request.method == "OPTIONS":
+        return jsonify({"message": "OK"}), 200
+    
+    try:
+        data = request.get_json()
+        items = data.get("items", [])
+        
+        if not items:
+            return jsonify({
+                'success': True,
+                'existing': [],
+                'existing_keys': []
+            })
+        
+        existing_items = []
+        existing_keys = set()
+        
+        for item in items:
+            item_name = item.get('item_name', '').strip()
+            batch_code = item.get('batch_code', '').strip() if item.get('batch_code') else ''
+            brand_code = item.get('brand_code', '').strip()
+            
+            # Skip items without item name
+            if not item_name:
+                continue
+            
+            # Build query based on available fields
+            if batch_code:
+                # If batch code is provided, use exact match with both item name and batch code
+                stock_item = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        Stock.batch_code == batch_code
+                    )
+                ).first()
+            else:
+                # If no batch code, only match items that also have no batch code
+                stock_item = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                    )
+                ).first()
+            
+            if stock_item:
+                key = f"{item_name}|{batch_code if batch_code else 'NO_BATCH'}"
+                existing_keys.add(key)
+                existing_items.append({
+                    'id': stock_item.id,
+                    'stock_id': stock_item.stock_id,
+                    'item_name': stock_item.item_name,
+                    'batch_code': stock_item.batch_code,
+                    'brand_code': stock_item.brand_code,
+                    'quantity': stock_item.quantity,
+                    'length': stock_item.length,
+                    'width': stock_item.width,
+                    'buy_price': stock_item.buy_price,
+                    'mrp': stock_item.mrp,
+                    'unit': stock_item.unit
+                })
+        
+        return jsonify({
+            'success': True,
+            'existing': existing_items,
+            'existing_keys': list(existing_keys)
+        })
+        
+    except Exception as e:
+        print(f"Error in check_batch_unique: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+# -------------------------------------------------------
 # GET BUY PRICE BY BRAND CODE (SPECIFIC ENDPOINT)
 # -------------------------------------------------------
 @stock_bp.route("/buy-price/<string:brand_code>", methods=["GET"])
@@ -92,7 +175,8 @@ def get_buy_price(brand_code):
                 "mrp": stock.mrp,
                 "brand": stock.brand,
                 "hsn": stock.hsn,
-                "unit": stock.unit
+                "unit": stock.unit,
+                "batch_code": stock.batch_code
             }
         }), 200
         
@@ -139,7 +223,8 @@ def get_bulk_buy_prices():
                     "mrp": stock.mrp,
                     "brand": stock.brand,
                     "hsn": stock.hsn,
-                    "unit": stock.unit
+                    "unit": stock.unit,
+                    "batch_code": stock.batch_code
                 })
             else:
                 not_found.append(code)
@@ -158,7 +243,7 @@ def get_bulk_buy_prices():
 
 
 # -------------------------------------------------------
-# BULK SAVE (INSERT NEW RECORDS)
+# BULK SAVE (INSERT NEW RECORDS) - FIXED: Treats different batch codes as unique
 # -------------------------------------------------------
 @stock_bp.route("/bulk-save", methods=["POST", "OPTIONS"])
 def bulk_save_stock():
@@ -173,48 +258,111 @@ def bulk_save_stock():
             return jsonify({"success": False, "message": "No data provided"}), 400
 
         saved = 0
-        duplicates = []
+        new_count = 0
+        updated_count = 0
+        duplicate_strings = []
+        duplicate_details = []
+        skipped = []
 
         for r in records:
             stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
             batch_code = str(r.get("Batch Code", "")).strip()
+            item_name = str(r.get("Item Name", "")).strip()
             
-            # Check if record already exists by stock_id, or brand_code+batch_code combination
+            # Skip if no item name
+            if not item_name:
+                skipped.append("Item with no name")
+                continue
+            
+            # CRITICAL: Check for existing item using Item Name + Batch Code combination
+            # Different batch codes mean different items!
             existing_stock = None
-            if stock_id:
+            if item_name:
+                if batch_code:
+                    # If batch code is provided, require exact match on both
+                    existing_stock = Stock.query.filter(
+                        and_(
+                            Stock.item_name == item_name,
+                            Stock.batch_code == batch_code
+                        )
+                    ).first()
+                else:
+                    # If no batch code, only match items with no batch code
+                    existing_stock = Stock.query.filter(
+                        and_(
+                            Stock.item_name == item_name,
+                            or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                        )
+                    ).first()
+            
+            # If not found by Item Name + Batch Code, try stock_id (but careful!)
+            if not existing_stock and stock_id:
                 existing_stock = Stock.query.filter_by(stock_id=stock_id).first()
             
-            # If not found by stock_id, try brand_code + batch_code combination
-            if not existing_stock and brand_code and batch_code:
-                existing_stock = Stock.query.filter_by(
-                    brand_code=brand_code, 
-                    batch_code=batch_code
-                ).first()
-            
-            # If still not found, try brand_code only
-            if not existing_stock and brand_code:
-                existing_stock = Stock.query.filter_by(brand_code=brand_code).first()
-            
+            # If found, update existing item
             if existing_stock:
-                # Record exists, skip insertion to avoid duplicate
-                duplicates.append(stock_id if stock_id else brand_code)
+                # Parse numeric values
+                try:
+                    length_val = float(r.get("Length", existing_stock.length)) if r.get("Length") is not None else existing_stock.length
+                    width_val = float(r.get("Width", existing_stock.width)) if r.get("Width") is not None else existing_stock.width
+                    qty_val = float(r.get("Qty", existing_stock.quantity)) if r.get("Qty") is not None else existing_stock.quantity
+                    auto_count = length_val * width_val * qty_val
+                except:
+                    length_val = existing_stock.length
+                    width_val = existing_stock.width
+                    qty_val = existing_stock.quantity
+                    auto_count = existing_stock.auto_calculate_count
+                
+                # Update fields
+                if item_name:
+                    existing_stock.item_name = item_name
+                if r.get("Brand"):
+                    existing_stock.brand = r.get("Brand", existing_stock.brand).strip()
+                if r.get("Length") is not None:
+                    existing_stock.length = length_val
+                if r.get("Width") is not None:
+                    existing_stock.width = width_val
+                if r.get("Qty") is not None:
+                    existing_stock.quantity = qty_val
+                    existing_stock.auto_calculate_count = auto_count
+                if r.get("Buy Price") is not None:
+                    existing_stock.buy_price = float(r.get("Buy Price", existing_stock.buy_price))
+                if r.get("Batch Code"):
+                    existing_stock.batch_code = batch_code
+                if r.get("Brand Code"):
+                    existing_stock.brand_code = brand_code
+                if r.get("Brand Description"):
+                    existing_stock.brand_description = r.get("Brand Description", existing_stock.brand_description).strip()
+                if r.get("HSN"):
+                    existing_stock.hsn = r.get("HSN", existing_stock.hsn).strip()
+                if r.get("MRP") is not None:
+                    existing_stock.mrp = float(r.get("MRP", existing_stock.mrp))
+                if r.get("Unit"):
+                    existing_stock.unit = r.get("Unit", existing_stock.unit).strip()
+                if r.get("GST") is not None:
+                    existing_stock.gst = float(r.get("GST", existing_stock.gst))
+                
+                updated_count += 1
+                duplicate_strings.append(f"{item_name} (Batch: {batch_code if batch_code else 'NO BATCH'})")
+                duplicate_details.append({
+                    "item_name": item_name,
+                    "batch_code": batch_code,
+                    "reason": "Updated existing item"
+                })
                 continue
             
-            # If no ID provided, generate one from brand code and batch code
-            if not stock_id and brand_code:
-                stock_id = f"ID_{brand_code}"
+            # If no ID provided, generate one from item name and batch code
+            if not stock_id and item_name:
+                stock_id = f"ID_{item_name.replace(' ', '_')}"
                 if batch_code:
-                    stock_id = f"ID_{brand_code}_{batch_code}"
-            elif not stock_id:
-                # Skip records with no identifier
-                continue
-
+                    stock_id = f"ID_{item_name.replace(' ', '_')}_{batch_code}"
+            
             # Parse numeric values with defaults
             try:
-                length_val = float(r.get("Length", 0))
-                width_val = float(r.get("Width", 0))
-                qty_val = float(r.get("Qty", 0))
+                length_val = float(r.get("Length", 0)) if r.get("Length") else 0
+                width_val = float(r.get("Width", 0)) if r.get("Width") else 0
+                qty_val = float(r.get("Qty", 0)) if r.get("Qty") else 0
                 auto_count = length_val * width_val * qty_val
             except:
                 length_val = 0
@@ -225,24 +373,25 @@ def bulk_save_stock():
             # CREATE NEW RECORD
             new_stock = Stock(
                 stock_id=stock_id,
-                item_name=r.get("Item Name", "").strip(),
+                item_name=item_name,
                 brand=r.get("Brand", "").strip(),
                 length=length_val,
                 width=width_val,
                 quantity=qty_val,
                 auto_calculate_count=auto_count,
-                buy_price=float(r.get("Buy Price", 0)),
-                batch_code=batch_code,
-                brand_code=brand_code,
+                buy_price=float(r.get("Buy Price", 0)) if r.get("Buy Price") else 0,
+                batch_code=batch_code if batch_code else None,
+                brand_code=brand_code if brand_code else None,
                 brand_description=r.get("Brand Description", "").strip(),
                 hsn=r.get("HSN", "").strip(),
-                mrp=float(r.get("MRP", 0)),
+                mrp=float(r.get("MRP", 0)) if r.get("MRP") else 0,
                 unit=r.get("Unit", "").strip(),
-                gst=float(r.get("GST", 0))
+                gst=float(r.get("GST", 0)) if r.get("GST") else 0
             )
 
             db.session.add(new_stock)
             saved += 1
+            new_count += 1
 
         db.session.commit()
 
@@ -250,13 +399,17 @@ def bulk_save_stock():
             "success": True,
             "message": "Bulk stock saved successfully",
             "saved": saved,
-            "duplicates": duplicates
+            "new_count": new_count,
+            "updated_count": updated_count,
+            "duplicates": duplicate_strings,
+            "duplicate_details": duplicate_details,
+            "skipped": skipped
         }), 200
 
     except Exception as e:
         print("Bulk Save Error:", e)
         db.session.rollback()
-        return jsonify({"success": False, "message": "Server Error"}), 500
+        return jsonify({"success": False, "message": f"Server Error: {str(e)}"}), 500
 
 
 # -------------------------------------------------------
@@ -275,7 +428,7 @@ def update_stock_bulk():
             # Single item update format
             records = [{
                 **data["updateData"],
-                **data["criteria"]  # Merge criteria with update data
+                **data["criteria"]
             }]
         elif "records" in data:
             records = data.get("records", [])
@@ -293,15 +446,32 @@ def update_stock_bulk():
             if '_id' in r:
                 del r['_id']
             
-            # Try multiple ways to find the stock item
             stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
             batch_code = str(r.get("Batch Code", "")).strip()
+            item_name = str(r.get("Item Name", "")).strip()
             
             stock = None
             
-            # Try by ID first
-            if stock_id:
+            # Try by Item Name + Batch Code combination (most accurate)
+            if item_name and batch_code:
+                stock = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        Stock.batch_code == batch_code
+                    )
+                ).first()
+            elif item_name and not batch_code:
+                # If no batch code, match items with no batch code
+                stock = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                    )
+                ).first()
+            
+            # Try by ID
+            if not stock and stock_id:
                 stock = Stock.query.filter_by(stock_id=stock_id).first()
             
             # Try by Brand Code + Batch Code combination
@@ -311,16 +481,12 @@ def update_stock_bulk():
                     batch_code=batch_code
                 ).first()
             
-            # Try by Brand Code only
+            # Try by Brand Code only (be careful - might match wrong item)
             if not stock and brand_code:
                 stock = Stock.query.filter_by(brand_code=brand_code).first()
-            
-            # Try by Batch Code only
-            if not stock and batch_code:
-                stock = Stock.query.filter_by(batch_code=batch_code).first()
 
             if not stock:
-                not_found.append(stock_id if stock_id else brand_code if brand_code else batch_code)
+                not_found.append(stock_id if stock_id else brand_code if brand_code else batch_code if batch_code else item_name)
                 continue
 
             # Parse and calculate auto count
@@ -346,6 +512,7 @@ def update_stock_bulk():
                 stock.width = width_val
             if "Qty" in r:
                 stock.quantity = qty_val
+                stock.auto_calculate_count = auto_count
             if "AutoCalculate Count" in r:
                 stock.auto_calculate_count = auto_count
             if "Buy Price" in r:
@@ -402,11 +569,28 @@ def update_stock_single():
         stock_id = str(criteria.get("ID", "")).strip()
         brand_code = str(criteria.get("Brand Code", "")).strip()
         batch_code = str(criteria.get("Batch Code", "")).strip()
+        item_name = str(criteria.get("Item Name", "")).strip()
         
         stock = None
         
+        # Try by Item Name + Batch Code combination
+        if item_name and batch_code:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    Stock.batch_code == batch_code
+                )
+            ).first()
+        elif item_name and not batch_code:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                )
+            ).first()
+        
         # Try by ID
-        if stock_id:
+        if not stock and stock_id:
             stock = Stock.query.filter_by(stock_id=stock_id).first()
         
         # Try by Brand Code + Batch Code combination
@@ -419,10 +603,6 @@ def update_stock_single():
         # Try by Brand Code only
         if not stock and brand_code:
             stock = Stock.query.filter_by(brand_code=brand_code).first()
-        
-        # Try by Batch Code only
-        if not stock and batch_code:
-            stock = Stock.query.filter_by(batch_code=batch_code).first()
 
         if not stock:
             return jsonify({
@@ -456,7 +636,6 @@ def update_stock_single():
                 else:
                     setattr(stock, db_field, str(value).strip() if value else "")
             elif key == "AutoCalculate Count":
-                # This is calculated, so we'll update it after other fields
                 pass
 
         # Recalculate auto count if quantity, length, or width changed
@@ -498,13 +677,31 @@ def update_quantity_bulk():
             stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
             batch_code = str(r.get("Batch Code", "")).strip()
+            item_name = str(r.get("Item Name", "")).strip()
             new_quantity = r.get("Qty", None)
             
             if new_quantity is None:
                 continue
 
             stock = None
-            if stock_id:
+            
+            # Try by Item Name + Batch Code
+            if item_name and batch_code:
+                stock = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        Stock.batch_code == batch_code
+                    )
+                ).first()
+            elif item_name and not batch_code:
+                stock = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                    )
+                ).first()
+            
+            if not stock and stock_id:
                 stock = Stock.query.filter_by(stock_id=stock_id).first()
             
             if not stock and brand_code and batch_code:
@@ -518,18 +715,14 @@ def update_quantity_bulk():
 
             if stock:
                 try:
-                    # Parse the new quantity
                     qty_val = float(new_quantity)
-                    
-                    # Update quantity and recalculate auto_calculate_count
                     stock.quantity = qty_val
                     stock.auto_calculate_count = stock.length * stock.width * qty_val
-                    
                     updated += 1
                 except ValueError:
                     not_found.append(f"{stock_id if stock_id else brand_code} (invalid quantity)")
             else:
-                not_found.append(stock_id if stock_id else brand_code if brand_code else batch_code)
+                not_found.append(stock_id if stock_id else brand_code if brand_code else batch_code if batch_code else item_name)
 
         db.session.commit()
 
@@ -568,10 +761,27 @@ def update_mrp_bulk():
             stock_id = str(r.get("ID", "")).strip()
             brand_code = str(r.get("Brand Code", "")).strip()
             batch_code = str(r.get("Batch Code", "")).strip()
+            item_name = str(r.get("Item Name", "")).strip()
             mrp = r.get("MRP", None)
 
             stock = None
-            if stock_id:
+            
+            if item_name and batch_code:
+                stock = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        Stock.batch_code == batch_code
+                    )
+                ).first()
+            elif item_name and not batch_code:
+                stock = Stock.query.filter(
+                    and_(
+                        Stock.item_name == item_name,
+                        or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                    )
+                ).first()
+            
+            if not stock and stock_id:
                 stock = Stock.query.filter_by(stock_id=stock_id).first()
             
             if not stock and brand_code and batch_code:
@@ -588,7 +798,7 @@ def update_mrp_bulk():
                     stock.mrp = float(mrp)
                 updated += 1
             else:
-                not_found.append(stock_id if stock_id else brand_code if brand_code else batch_code)
+                not_found.append(stock_id if stock_id else brand_code if brand_code else batch_code if batch_code else item_name)
 
         db.session.commit()
 
@@ -655,11 +865,28 @@ def delete_stock():
         stock_id = str(data.get("ID", "")).strip()
         brand_code = str(data.get("Brand Code", "")).strip()
         batch_code = str(data.get("Batch Code", "")).strip()
+        item_name = str(data.get("Item Name", "")).strip()
 
         stock = None
         
+        # Try by Item Name + Batch Code
+        if item_name and batch_code:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    Stock.batch_code == batch_code
+                )
+            ).first()
+        elif item_name and not batch_code:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                )
+            ).first()
+        
         # Try by ID
-        if stock_id:
+        if not stock and stock_id:
             stock = Stock.query.filter_by(stock_id=stock_id).first()
         
         # Try by Brand Code + Batch Code combination
@@ -672,10 +899,6 @@ def delete_stock():
         # Try by Brand Code only
         if not stock and brand_code:
             stock = Stock.query.filter_by(brand_code=brand_code).first()
-        
-        # Try by Batch Code only
-        if not stock and batch_code:
-            stock = Stock.query.filter_by(batch_code=batch_code).first()
 
         if not stock:
             return jsonify({
@@ -738,4 +961,107 @@ def get_stock_by_batch(batch_code):
         
     except Exception as e:
         print("Get Stock by Batch Code Error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+
+
+# -------------------------------------------------------
+# GET STOCK BY ITEM NAME AND BATCH CODE
+# -------------------------------------------------------
+@stock_bp.route("/by-item-batch", methods=["POST"])
+def get_stock_by_item_batch():
+    try:
+        data = request.get_json()
+        item_name = data.get("item_name", "").strip()
+        batch_code = data.get("batch_code", "").strip()
+        
+        if not item_name:
+            return jsonify({"success": False, "message": "Item Name required"}), 400
+        
+        if batch_code:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    Stock.batch_code == batch_code
+                )
+            ).first()
+        else:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                )
+            ).first()
+        
+        if not stock:
+            return jsonify({
+                "success": False, 
+                "message": f"Stock item with Item Name '{item_name}' and Batch Code '{batch_code}' not found"
+            }), 404
+        
+        return jsonify({
+            "success": True,
+            "data": {
+                "id": stock.id,
+                "ID": stock.stock_id,
+                "Item Name": stock.item_name,
+                "Brand": stock.brand,
+                "Length": stock.length,
+                "Width": stock.width,
+                "Qty": stock.quantity,
+                "AutoCalculate Count": stock.auto_calculate_count,
+                "Buy Price": stock.buy_price,
+                "Batch Code": stock.batch_code,
+                "Brand Code": stock.brand_code,
+                "Brand Description": stock.brand_description,
+                "HSN": stock.hsn,
+                "MRP": stock.mrp,
+                "Unit": stock.unit,
+                "GST": stock.gst
+            }
+        }), 200
+        
+    except Exception as e:
+        print("Get Stock by Item Name and Batch Code Error:", e)
+        return jsonify({"success": False, "message": "Server error"}), 500
+
+
+# -------------------------------------------------------
+# CHECK IF ITEM NAME AND BATCH CODE COMBINATION EXISTS
+# -------------------------------------------------------
+@stock_bp.route("/exists", methods=["POST"])
+def check_item_exists():
+    try:
+        data = request.get_json()
+        item_name = data.get("item_name", "").strip()
+        batch_code = data.get("batch_code", "").strip()
+        
+        if not item_name:
+            return jsonify({"success": False, "message": "Item Name required"}), 400
+        
+        if batch_code:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    Stock.batch_code == batch_code
+                )
+            ).first()
+        else:
+            stock = Stock.query.filter(
+                and_(
+                    Stock.item_name == item_name,
+                    or_(Stock.batch_code == '', Stock.batch_code.is_(None))
+                )
+            ).first()
+        
+        return jsonify({
+            "success": True,
+            "exists": stock is not None,
+            "data": {
+                "id": stock.id if stock else None,
+                "quantity": stock.quantity if stock else None
+            } if stock else None
+        }), 200
+        
+    except Exception as e:
+        print("Check Item Exists Error:", e)
         return jsonify({"success": False, "message": "Server error"}), 500

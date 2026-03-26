@@ -13,7 +13,7 @@ VALID_STATUSES = ['pending', 'approved', 'rejected', 'completed']
 # ---------------------------
 def generate_po_number():
     today = datetime.now()
-    year_month = today.strftime("%Y%m")  # YYYYMM
+    year_month = today.strftime("%Y%m")
 
     latest_po = (
         PurchaseOrder.query
@@ -35,6 +35,52 @@ def generate_po_number():
 
 
 # ---------------------------
+# Helper: Calculate remaining quantities
+# ---------------------------
+def calculate_remaining_items_with_received(po):
+    """Calculate remaining quantities for each item in PO"""
+    items = po.items.copy() if po.items else []
+    received_items = po.received_items if po.received_items else []
+    
+    # Create a mapping of received quantities by item index
+    received_map = {}
+    for received in received_items:
+        item_idx = received.get('item_index')
+        if item_idx is not None:
+            received_map[item_idx] = received.get('received_quantity', 0)
+    
+    # Calculate remaining for each item
+    for idx, item in enumerate(items):
+        ordered_qty = item.get('quantity', 0)
+        delivered_qty = received_map.get(idx, 0)
+        remaining_qty = ordered_qty - delivered_qty
+        
+        item['delivered_quantity'] = delivered_qty
+        item['remaining_quantity'] = remaining_qty
+        item['original_quantity'] = ordered_qty
+    
+    # Filter out items with zero remaining quantity
+    remaining_items = [item for idx, item in enumerate(items) if item.get('remaining_quantity', 0) > 0]
+    
+    # Format received items for response
+    formatted_received_items = []
+    for received in received_items:
+        item_idx = received.get('item_index')
+        if item_idx is not None and item_idx < len(items):
+            formatted_received_items.append({
+                'item_index': item_idx,
+                'item_name': items[item_idx].get('item_name'),
+                'ordered_quantity': items[item_idx].get('quantity'),
+                'received_quantity': received.get('received_quantity', 0),
+                'pending_quantity': items[item_idx].get('quantity', 0) - received.get('received_quantity', 0),
+                'receipt_history': received.get('receipt_history', []),
+                'last_received_date': received.get('last_received_date')
+            })
+    
+    return items, remaining_items, formatted_received_items
+
+
+# ---------------------------
 # Create Purchase Order
 # ---------------------------
 @purchase_order_bp.route('/create', methods=['POST'])
@@ -42,7 +88,6 @@ def create_purchase_order():
     try:
         data = request.get_json() or {}
 
-        # Required fields
         if not data.get('company_name'):
             return jsonify({'success': False, 'error': 'Company Name is required'}), 400
             
@@ -53,7 +98,6 @@ def create_purchase_order():
         if not isinstance(items, list) or not items:
             return jsonify({'success': False, 'error': 'At least one item is required'}), 400
 
-        # Calculate total amount
         total_amount = 0.0
         for item in items:
             quantity = float(item.get('quantity', 0))
@@ -67,7 +111,6 @@ def create_purchase_order():
             if data.get('po_date') else date.today()
         )
 
-        # Handle delivery date (optional)
         delivery_date = None
         if data.get('delivery_date'):
             delivery_date = datetime.strptime(data['delivery_date'], '%Y-%m-%d').date()
@@ -95,21 +138,31 @@ def create_purchase_order():
             delivery_date=delivery_date,
             status=status,
             items=items,
-            total_amount=total_amount
+            total_amount=total_amount,
+            received_items=[]
         )
 
         db.session.add(new_po)
         db.session.commit()
 
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(new_po)
+        
+        po_dict = new_po.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
+        
         return jsonify({
             'success': True,
             'message': 'Purchase Order created successfully',
-            'data': new_po.to_dict()
+            'data': po_dict
         }), 201
 
     except Exception as e:
         db.session.rollback()
         print(f"Error creating purchase order: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -126,20 +179,93 @@ def get_all_purchase_orders():
             query = query.filter(PurchaseOrder.status == status)
 
         purchase_orders = query.order_by(PurchaseOrder.created_on.desc()).all()
+        
+        result = []
+        for po in purchase_orders:
+            items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(po)
+            
+            po_dict = po.to_dict()
+            po_dict['items'] = items_with_delivery
+            po_dict['remaining_items'] = remaining_items
+            po_dict['received_items'] = received_items
+            
+            result.append(po_dict)
 
         return jsonify({
             'success': True,
-            'count': len(purchase_orders),
-            'data': [po.to_dict() for po in purchase_orders]
+            'count': len(result),
+            'data': result
         }), 200
 
     except Exception as e:
         print(f"Error getting purchase orders: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ---------------------------
-# Update PO Status (with remarks)
+# Get PO by Number
+# ---------------------------
+@purchase_order_bp.route('/by-number/<po_number>', methods=['GET'])
+def get_po_by_number(po_number):
+    try:
+        purchase_order = PurchaseOrder.query.filter_by(po_number=po_number).first()
+        
+        if not purchase_order:
+            return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
+        
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
+        po_dict = purchase_order.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
+        
+        return jsonify({
+            'success': True,
+            'data': po_dict
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting PO: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Get PO by ID
+# ---------------------------
+@purchase_order_bp.route('/get/<int:po_id>', methods=['GET'])
+def get_po_by_id(po_id):
+    try:
+        purchase_order = PurchaseOrder.query.get(po_id)
+        
+        if not purchase_order:
+            return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
+        
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
+        po_dict = purchase_order.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
+        
+        return jsonify({
+            'success': True,
+            'data': po_dict
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting PO: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Update PO Status
 # ---------------------------
 @purchase_order_bp.route('/update-status/<int:po_id>', methods=['PUT'])
 def update_purchase_order_status(po_id):
@@ -161,42 +287,43 @@ def update_purchase_order_status(po_id):
 
         purchase_order.status = new_status
         
-        # Handle approval
         if new_status == 'approved':
             purchase_order.approval_remarks = approval_remarks
             purchase_order.approved_date = datetime.utcnow()
             purchase_order.rejection_remarks = None
             purchase_order.rejected_date = None
-        
-        # Handle rejection
         elif new_status == 'rejected':
             purchase_order.rejection_remarks = rejection_remarks
             purchase_order.rejected_date = datetime.utcnow()
             purchase_order.approval_remarks = None
             purchase_order.approved_date = None
-        
-        # Handle completion or reset to pending
         else:
             if new_status == 'pending':
                 purchase_order.approval_remarks = None
                 purchase_order.approved_date = None
                 purchase_order.rejection_remarks = None
                 purchase_order.rejected_date = None
-            elif new_status == 'completed':
-                # Keep existing approval remarks for completed orders
-                pass
 
         db.session.commit()
+
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
+        po_dict = purchase_order.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
 
         return jsonify({
             'success': True,
             'message': f'Status updated to {new_status}',
-            'data': purchase_order.to_dict()
+            'data': po_dict
         }), 200
 
     except Exception as e:
         db.session.rollback()
         print(f"Error updating status: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -212,14 +339,12 @@ def update_purchase_order(po_id):
         if not purchase_order:
             return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
 
-        # Only allow updates if status is pending
         if purchase_order.status != 'pending':
             return jsonify({
                 'success': False,
                 'error': f'Cannot update PO with status {purchase_order.status}'
             }), 400
 
-        # Update company fields
         update_fields = [
             'company_name', 'company_address', 'customer_name', 
             'customer_mobile', 'customer_email', 'department',
@@ -252,15 +377,24 @@ def update_purchase_order(po_id):
 
         db.session.commit()
 
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
+        po_dict = purchase_order.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
+
         return jsonify({
             'success': True,
             'message': 'Purchase Order updated successfully',
-            'data': purchase_order.to_dict()
+            'data': po_dict
         }), 200
 
     except Exception as e:
         db.session.rollback()
         print(f"Error updating purchase order: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -275,7 +409,6 @@ def delete_purchase_order(po_id):
         if not purchase_order:
             return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
 
-        # Only allow deletion if status is pending
         if purchase_order.status != 'pending':
             return jsonify({
                 'success': False,
@@ -290,6 +423,8 @@ def delete_purchase_order(po_id):
     except Exception as e:
         db.session.rollback()
         print(f"Error deleting purchase order: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -335,125 +470,377 @@ def get_po_statistics():
 
     except Exception as e:
         print(f"Error getting statistics: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
-    
-    # ---------------------------
-# Get Approved POs (Not Completed)
+
+
+# ---------------------------
+# DEBUG: Check all approved POs
+# ---------------------------
+@purchase_order_bp.route('/debug-check', methods=['GET'])
+def debug_check():
+    try:
+        purchase_orders = PurchaseOrder.query.filter(
+            PurchaseOrder.status == 'approved'
+        ).all()
+        
+        result = []
+        for po in purchase_orders:
+            total_ordered = sum(item.get('quantity', 0) for item in po.items)
+            total_received = 0
+            if po.received_items:
+                for received in po.received_items:
+                    total_received += received.get('received_quantity', 0)
+            
+            result.append({
+                'id': po.id,
+                'po_number': po.po_number,
+                'status': po.status,
+                'ordered_qty': total_ordered,
+                'received_qty': total_received,
+                'pending_qty': total_ordered - total_received,
+                'items': po.items,
+                'received_items': po.received_items
+            })
+        
+        return jsonify({
+            'success': True,
+            'data': result
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Get Approved POs (Ready for Receipt)
 # ---------------------------
 @purchase_order_bp.route('/approved-not-completed', methods=['GET'])
 def get_approved_not_completed():
     try:
-        # Get all approved POs that are not completed
         purchase_orders = PurchaseOrder.query.filter(
             PurchaseOrder.status == 'approved'
-        ).order_by(PurchaseOrder.created_on.desc()).all()
+        ).all()
+        
+        print(f"\n=== Found {len(purchase_orders)} approved POs ===")
+        
+        result = []
+        for po in purchase_orders:
+            print(f"\n--- PO: {po.po_number} ---")
+            print(f"Items: {po.items}")
+            print(f"Received Items: {po.received_items}")
+            
+            items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(po)
+            
+            # Calculate total pending quantity
+            total_pending = sum(item.get('remaining_quantity', 0) for item in items_with_delivery)
+            print(f"Total pending: {total_pending}")
+            
+            # Only include if pending > 0
+            if total_pending > 0:
+                po_dict = po.to_dict()
+                po_dict['items'] = items_with_delivery
+                po_dict['remaining_items'] = remaining_items
+                po_dict['received_items'] = received_items
+                po_dict['total_pending'] = total_pending
+                
+                result.append(po_dict)
+                print(f"✓ ADDED to result")
+            else:
+                print(f"✗ SKIPPED (no pending items)")
+        
+        print(f"\n=== Total POs with pending: {len(result)} ===\n")
         
         return jsonify({
             'success': True,
-            'count': len(purchase_orders),
-            'data': [po.to_dict() for po in purchase_orders]
+            'count': len(result),
+            'data': result
         }), 200
         
     except Exception as e:
-        print(f"Error getting approved POs: {str(e)}")
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ---------------------------
-# Receive Items (Partial or Full)
+# Receive Items (POST method)
 # ---------------------------
 @purchase_order_bp.route('/receive-items/<int:po_id>', methods=['POST'])
 def receive_items(po_id):
     try:
         data = request.get_json() or {}
-        received_quantities = data.get('received_quantities', [])  # List of items with received quantity
+        received_quantities = data.get('received_quantities', [])
         
         purchase_order = PurchaseOrder.query.get(po_id)
         if not purchase_order:
             return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
         
-        # Check if PO is approved
-        if purchase_order.status != 'approved':
-            return jsonify({
-                'success': False,
-                'error': f'Cannot receive items for PO with status {purchase_order.status}'
-            }), 400
-        
-        # Initialize received_items if not exists
         if not purchase_order.received_items:
-            # Initialize received_items array with zeros for each item
             purchase_order.received_items = []
-            for item in purchase_order.items:
-                purchase_order.received_items.append({
-                    'item_index': len(purchase_order.received_items),
-                    'item_name': item.get('item_name'),
-                    'ordered_quantity': item.get('quantity', 0),
-                    'received_quantity': 0,
-                    'pending_quantity': item.get('quantity', 0),
-                    'last_received_date': None,
-                    'receipt_history': []
-                })
+        
+        # Create a dictionary of existing received items by index
+        received_dict = {}
+        for received in purchase_order.received_items:
+            item_idx = received.get('item_index')
+            if item_idx is not None:
+                received_dict[item_idx] = received
         
         # Update received quantities
         for received_item in received_quantities:
             item_index = received_item.get('item_index')
             received_qty = float(received_item.get('received_quantity', 0))
+            remarks = received_item.get('remarks', '')
             
-            if item_index is not None and item_index < len(purchase_order.received_items):
-                current_received = purchase_order.received_items[item_index].get('received_quantity', 0)
-                ordered_qty = purchase_order.received_items[item_index].get('ordered_quantity', 0)
+            if item_index is not None and item_index < len(purchase_order.items):
+                ordered_qty = purchase_order.items[item_index].get('quantity', 0)
+                item_name = purchase_order.items[item_index].get('item_name', '')
                 
-                # Check if received quantity exceeds ordered quantity
+                current_received = 0
+                if item_index in received_dict:
+                    current_received = received_dict[item_index].get('received_quantity', 0)
+                
                 if current_received + received_qty > ordered_qty:
                     return jsonify({
                         'success': False,
-                        'error': f'Received quantity exceeds ordered quantity for item {item_index + 1}'
+                        'error': f'Received quantity exceeds ordered quantity for item {item_name}'
                     }), 400
                 
-                # Update received quantity
-                new_received = current_received + received_qty
-                purchase_order.received_items[item_index]['received_quantity'] = new_received
-                purchase_order.received_items[item_index]['pending_quantity'] = ordered_qty - new_received
-                
-                # Add to receipt history
-                if not purchase_order.received_items[item_index].get('receipt_history'):
-                    purchase_order.received_items[item_index]['receipt_history'] = []
-                
-                purchase_order.received_items[item_index]['receipt_history'].append({
-                    'date': datetime.utcnow().isoformat(),
-                    'quantity': received_qty,
-                    'remarks': received_item.get('remarks', '')
-                })
-                
-                purchase_order.received_items[item_index]['last_received_date'] = datetime.utcnow().isoformat()
+                if item_index in received_dict:
+                    received_dict[item_index]['received_quantity'] = current_received + received_qty
+                    received_dict[item_index]['pending_quantity'] = ordered_qty - (current_received + received_qty)
+                    
+                    if 'receipt_history' not in received_dict[item_index]:
+                        received_dict[item_index]['receipt_history'] = []
+                    
+                    received_dict[item_index]['receipt_history'].append({
+                        'date': datetime.utcnow().isoformat(),
+                        'quantity': received_qty,
+                        'remarks': remarks,
+                        'type': 'receive'
+                    })
+                    
+                    # Update last received date
+                    received_dict[item_index]['last_received_date'] = datetime.utcnow().isoformat()
+                else:
+                    received_dict[item_index] = {
+                        'item_index': item_index,
+                        'item_name': item_name,
+                        'ordered_quantity': ordered_qty,
+                        'received_quantity': received_qty,
+                        'pending_quantity': ordered_qty - received_qty,
+                        'receipt_history': [{
+                            'date': datetime.utcnow().isoformat(),
+                            'quantity': received_qty,
+                            'remarks': remarks,
+                            'type': 'receive'
+                        }],
+                        'last_received_date': datetime.utcnow().isoformat()
+                    }
+        
+        purchase_order.received_items = list(received_dict.values())
         
         # Check if all items are fully received
-        all_received = all(
-            item.get('pending_quantity', 0) == 0 
-            for item in purchase_order.received_items
-        )
+        all_received = True
+        for idx, item in enumerate(purchase_order.items):
+            ordered_qty = item.get('quantity', 0)
+            received_qty = 0
+            if idx in received_dict:
+                received_qty = received_dict[idx].get('received_quantity', 0)
+            if received_qty < ordered_qty:
+                all_received = False
+                break
         
-        # Update status if all items received
-        if all_received and purchase_order.status == 'approved':
+        if all_received:
             purchase_order.status = 'completed'
-            purchase_order.delivery_date = datetime.utcnow().date()
+            db.session.commit()
+            message = "All items received! PO completed."
+        else:
+            # If PO was previously completed but now partially received? 
+            # Reset status to approved if it was completed
+            if purchase_order.status == 'completed':
+                purchase_order.status = 'approved'
+            db.session.commit()
+            message = "Items received successfully."
         
-        db.session.commit()
+        # Get updated data
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
+        po_dict = purchase_order.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
         
         return jsonify({
             'success': True,
-            'message': 'Items received successfully',
-            'data': purchase_order.to_dict()
+            'message': message,
+            'data': po_dict
         }), 200
         
     except Exception as e:
         db.session.rollback()
         print(f"Error receiving items: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
 # ---------------------------
-# Get Receipt History for a PO
+# UPDATE Received Items (PUT method) - NEW
+# ---------------------------
+@purchase_order_bp.route('/update-received-items/<int:po_id>', methods=['PUT'])
+def update_received_items(po_id):
+    """
+    Update existing received items for a purchase order
+    This is a PUT method to update receipt data
+    """
+    try:
+        data = request.get_json() or {}
+        received_quantities = data.get('received_quantities', [])
+        
+        purchase_order = PurchaseOrder.query.get(po_id)
+        if not purchase_order:
+            return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
+        
+        # Validate received quantities
+        for received_item in received_quantities:
+            item_index = received_item.get('item_index')
+            new_total_qty = float(received_item.get('received_quantity', 0))
+            
+            if item_index is not None and item_index < len(purchase_order.items):
+                ordered_qty = purchase_order.items[item_index].get('quantity', 0)
+                item_name = purchase_order.items[item_index].get('item_name', '')
+                
+                # New total should not exceed ordered quantity
+                if new_total_qty > ordered_qty:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Cannot set received quantity to {new_total_qty} for {item_name}. Ordered quantity is {ordered_qty}.'
+                    }), 400
+                
+                if new_total_qty < 0:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Received quantity cannot be negative for {item_name}'
+                    }), 400
+        
+        # Initialize received_items if None
+        if purchase_order.received_items is None:
+            purchase_order.received_items = []
+        
+        # Create a dictionary of existing received items by index
+        received_dict = {}
+        for received in purchase_order.received_items:
+            item_idx = received.get('item_index')
+            if item_idx is not None:
+                received_dict[item_idx] = received
+        
+        # Update received quantities
+        for received_item in received_quantities:
+            item_index = received_item.get('item_index')
+            new_total_qty = float(received_item.get('received_quantity', 0))
+            remarks = received_item.get('remarks', '')
+            
+            if item_index is not None and item_index < len(purchase_order.items):
+                item = purchase_order.items[item_index]
+                item_name = item.get('item_name', '')
+                ordered_qty = item.get('quantity', 0)
+                
+                # Get old quantity if exists
+                old_qty = 0
+                if item_index in received_dict:
+                    old_qty = received_dict[item_index].get('received_quantity', 0)
+                
+                # Calculate the difference
+                qty_difference = new_total_qty - old_qty
+                
+                if item_index in received_dict:
+                    # Update existing item
+                    received_dict[item_index]['received_quantity'] = new_total_qty
+                    received_dict[item_index]['pending_quantity'] = ordered_qty - new_total_qty
+                    
+                    # Add to receipt history if there's a change
+                    if qty_difference != 0:
+                        if 'receipt_history' not in received_dict[item_index]:
+                            received_dict[item_index]['receipt_history'] = []
+                        
+                        received_dict[item_index]['receipt_history'].append({
+                            'date': datetime.utcnow().isoformat(),
+                            'quantity': abs(qty_difference),
+                            'remarks': remarks,
+                            'type': 'update',
+                            'old_quantity': old_qty,
+                            'new_quantity': new_total_qty
+                        })
+                    
+                    # Update last received date if quantity increased
+                    if qty_difference > 0:
+                        received_dict[item_index]['last_received_date'] = datetime.utcnow().isoformat()
+                else:
+                    # Add new item
+                    received_dict[item_index] = {
+                        'item_index': item_index,
+                        'item_name': item_name,
+                        'ordered_quantity': ordered_qty,
+                        'received_quantity': new_total_qty,
+                        'pending_quantity': ordered_qty - new_total_qty,
+                        'receipt_history': [{
+                            'date': datetime.utcnow().isoformat(),
+                            'quantity': new_total_qty,
+                            'remarks': remarks,
+                            'type': 'initial_setup'
+                        }],
+                        'last_received_date': datetime.utcnow().isoformat() if new_total_qty > 0 else None
+                    }
+        
+        # Update the received_items list
+        purchase_order.received_items = list(received_dict.values())
+        
+        # Check if all items are fully received
+        all_received = True
+        for idx, item in enumerate(purchase_order.items):
+            ordered_qty = item.get('quantity', 0)
+            received_qty = 0
+            if idx in received_dict:
+                received_qty = received_dict[idx].get('received_quantity', 0)
+            if received_qty < ordered_qty:
+                all_received = False
+                break
+        
+        # Update PO status based on receipt status
+        if all_received:
+            purchase_order.status = 'completed'
+        elif purchase_order.status == 'completed' and not all_received:
+            purchase_order.status = 'approved'
+        
+        # Commit to database
+        db.session.commit()
+        
+        # Get updated data
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
+        po_dict = purchase_order.to_dict()
+        po_dict['items'] = items_with_delivery
+        po_dict['remaining_items'] = remaining_items
+        po_dict['received_items'] = received_items
+        
+        return jsonify({
+            'success': True,
+            'message': 'Received items updated successfully',
+            'data': po_dict
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error updating received items: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Get Receipt History
 # ---------------------------
 @purchase_order_bp.route('/receipt-history/<int:po_id>', methods=['GET'])
 def get_receipt_history(po_id):
@@ -462,16 +849,179 @@ def get_receipt_history(po_id):
         if not purchase_order:
             return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
         
+        items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(purchase_order)
+        
         return jsonify({
             'success': True,
             'data': {
                 'po_number': purchase_order.po_number,
-                'received_items': purchase_order.received_items or [],
-                'items': purchase_order.items,
+                'received_items': received_items,
+                'items': items_with_delivery,
+                'remaining_items': remaining_items,
                 'status': purchase_order.status
             }
         }), 200
         
     except Exception as e:
         print(f"Error getting receipt history: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Get Pending Items by PO Number
+# ---------------------------
+@purchase_order_bp.route('/pending-items', methods=['GET'])
+def get_pending_items():
+    """
+    Get all pending items across POs or for a specific PO
+    Query params:
+        po_number: (optional) get pending items for specific PO
+        status: (optional) filter by PO status (default: 'approved')
+    """
+    try:
+        po_number = request.args.get('po_number')
+        status = request.args.get('status', 'approved')
+        
+        # Build query
+        query = PurchaseOrder.query
+        
+        if status and status != 'all':
+            query = query.filter(PurchaseOrder.status == status)
+        
+        if po_number:
+            query = query.filter(PurchaseOrder.po_number == po_number)
+        
+        purchase_orders = query.all()
+        
+        pending_items = []
+        
+        for po in purchase_orders:
+            # Calculate remaining quantities
+            items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(po)
+            
+            # Add pending items to result
+            for item in remaining_items:
+                pending_items.append({
+                    'po_id': po.id,
+                    'po_number': po.po_number,
+                    'po_date': po.po_date.isoformat() if po.po_date else None,
+                    'company_name': po.company_name,
+                    'customer_name': po.customer_name,
+                    'item_index': item.get('index', items_with_delivery.index(item)),
+                    'item_name': item.get('item_name'),
+                    'item_description': item.get('item_description', ''),
+                    'ordered_quantity': item.get('original_quantity', 0),
+                    'received_quantity': item.get('delivered_quantity', 0),
+                    'pending_quantity': item.get('remaining_quantity', 0),
+                    'unit': item.get('unit', ''),
+                    'buy_price': item.get('buy_price', 0),
+                    'total_pending_value': item.get('remaining_quantity', 0) * item.get('buy_price', 0),
+                    'status': po.status
+                })
+        
+        return jsonify({
+            'success': True,
+            'count': len(pending_items),
+            'data': pending_items
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting pending items: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Simple Pending Summary by PO
+# ---------------------------
+@purchase_order_bp.route('/pending-summary', methods=['GET'])
+def get_pending_summary():
+    """
+    Get summary of pending quantities grouped by PO
+    """
+    try:
+        status = request.args.get('status', 'approved')
+        
+        query = PurchaseOrder.query.filter(PurchaseOrder.status == status)
+        purchase_orders = query.all()
+        
+        po_summary = []
+        total_pending_items = 0
+        total_pending_value = 0
+        
+        for po in purchase_orders:
+            items_with_delivery, remaining_items, received_items = calculate_remaining_items_with_received(po)
+            
+            po_pending_items = len(remaining_items)
+            po_pending_quantity = sum(item.get('remaining_quantity', 0) for item in remaining_items)
+            po_pending_value = sum(
+                item.get('remaining_quantity', 0) * item.get('buy_price', 0) 
+                for item in remaining_items
+            )
+            
+            if po_pending_items > 0:
+                po_summary.append({
+                    'po_id': po.id,
+                    'po_number': po.po_number,
+                    'po_date': po.po_date.isoformat() if po.po_date else None,
+                    'company_name': po.company_name,
+                    'customer_name': po.customer_name,
+                    'total_items': len(po.items),
+                    'pending_items_count': po_pending_items,
+                    'pending_quantity_total': po_pending_quantity,
+                    'pending_value_total': po_pending_value,
+                    'status': po.status
+                })
+                
+                total_pending_items += po_pending_items
+                total_pending_value += po_pending_value
+        
+        return jsonify({
+            'success': True,
+            'summary': {
+                'total_pos_with_pending': len(po_summary),
+                'total_pending_items': total_pending_items,
+                'total_pending_value': total_pending_value
+            },
+            'data': po_summary
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting pending summary: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ---------------------------
+# Get Single Received Item Details
+# ---------------------------
+@purchase_order_bp.route('/received-items/<int:po_id>/<int:item_index>', methods=['GET'])
+def get_received_item(po_id, item_index):
+    """Get received item details for a specific PO and item index"""
+    try:
+        purchase_order = PurchaseOrder.query.get(po_id)
+        if not purchase_order:
+            return jsonify({'success': False, 'error': 'Purchase Order not found'}), 404
+        
+        # Find the received item
+        received_item = None
+        for item in purchase_order.received_items or []:
+            if item.get('item_index') == item_index:
+                received_item = item
+                break
+        
+        if not received_item:
+            return jsonify({'success': False, 'error': 'Item not found in received items'}), 404
+        
+        return jsonify({
+            'success': True,
+            'data': received_item
+        }), 200
+        
+    except Exception as e:
+        print(f"Error getting received item: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
