@@ -9,6 +9,30 @@ grn_bp = Blueprint("grn_bp", __name__, url_prefix="/api/grn")
 
 
 # -------------------------------------------------------------------
+# GET ALL BATCH CODES (For duplicate prevention)
+# -------------------------------------------------------------------
+@grn_bp.route("/all-batch-codes", methods=["GET"])
+def get_all_batch_codes():
+    try:
+        # Get all active batch codes
+        batch_codes = db.session.query(GRN.batch_code).filter(
+            GRN.status == 'active'
+        ).all()
+        
+        batch_code_list = [bc[0] for bc in batch_codes if bc[0]]
+        
+        return jsonify({
+            'success': True,
+            'count': len(batch_code_list),
+            'data': batch_code_list
+        }), 200
+        
+    except Exception as e:
+        print(f"Error fetching batch codes: {str(e)}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# -------------------------------------------------------------------
 # GET ALL POs WITH DELIVERY STATUS (Completed & Partially Delivered)
 # -------------------------------------------------------------------
 @grn_bp.route("/all-pos-with-status", methods=["GET"])
