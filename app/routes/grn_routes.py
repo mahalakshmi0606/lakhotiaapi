@@ -40,7 +40,7 @@ def get_all_pos_with_status():
     try:
         # Get all completed POs
         all_pos = PurchaseOrder.query.filter(
-            PurchaseOrder.status == 'completed'
+            PurchaseOrder.status == 'completed','approved'
         ).order_by(PurchaseOrder.created_on.desc()).all()
         
         # Get all partial deliveries from GRN
@@ -133,7 +133,7 @@ def get_pos_ready_for_grn():
     try:
         # Get both approved and partially_received POs
         purchase_orders = PurchaseOrder.query.filter(
-            PurchaseOrder.status.in_(['approved', 'partially_received'])
+            PurchaseOrder.status.in_(['completed'])
         ).order_by(PurchaseOrder.created_on.desc()).all()
         
         # Get GRN deliveries to calculate remaining quantities
@@ -304,7 +304,7 @@ def get_purchase_order_details(po_number):
             return jsonify({"success": False, "message": "Purchase Order not found"}), 404
         
         # Check if PO is approved or partially received
-        if po.status not in ['approved', 'partially_received']:
+        if po.status not in ['completed']:
             return jsonify({
                 "success": False, 
                 "message": f"Purchase Order status is '{po.status}', only approved or partially received POs can be converted to GRN"
@@ -453,7 +453,7 @@ def save_grn_from_po():
             return jsonify({"success": False, "message": "Purchase Order not found"}), 404
         
         # Check if PO is approved or partially received
-        if po.status not in ['approved', 'partially_received']:
+        if po.status not in ['completed','approved']:
             return jsonify({
                 "success": False, 
                 "message": f"Cannot create GRN for PO with status '{po.status}', only approved or partially received POs allowed"
@@ -940,7 +940,7 @@ def delete_grn_item(grn_id):
                 po_number=po_number
             ).first()
             if po and po.status == 'converted_to_grn':
-                po.status = 'completed'
+                po.status = 'completed','approved'
         
         db.session.commit()
         
