@@ -122,10 +122,14 @@ def create_purchase_order():
                 'error': f'Status must be one of {", ".join(VALID_STATUSES)}'
             }), 400
 
+        company_id = data.get('company_id')
+        if company_id == "":
+            company_id = None
+
         new_po = PurchaseOrder(
             po_number=po_number,
             po_date=po_date,
-            company_id=data.get('company_id'),
+            company_id=company_id,
             company_name=data['company_name'],
             company_address=data.get('company_address'),
             customer_name=data['customer_name'],
@@ -354,7 +358,10 @@ def update_purchase_order(po_id):
         
         for field in update_fields:
             if field in data:
-                setattr(purchase_order, field, data[field])
+                val = data[field]
+                if field == 'company_id' and val == "":
+                    val = None
+                setattr(purchase_order, field, val)
 
         if data.get('po_date'):
             purchase_order.po_date = datetime.strptime(data['po_date'], '%Y-%m-%d').date()
@@ -654,6 +661,9 @@ def receive_items(po_id):
         
         if all_received:
             purchase_order.status = 'completed'
+            
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(purchase_order, "received_items")
             db.session.commit()
             message = "All items received! PO completed."
         else:
@@ -661,6 +671,9 @@ def receive_items(po_id):
             # Reset status to approved if it was completed
             if purchase_order.status == 'completed':
                 purchase_order.status = 'approved'
+                
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(purchase_order, "received_items")
             db.session.commit()
             message = "Items received successfully."
         
@@ -796,6 +809,9 @@ def update_received_items(po_id):
         
         # Update the received_items list
         purchase_order.received_items = list(received_dict.values())
+        
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(purchase_order, "received_items")
         
         # Check if all items are fully received
         all_received = True

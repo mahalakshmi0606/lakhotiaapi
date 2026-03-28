@@ -131,9 +131,8 @@ def get_all_pos_with_status():
 @grn_bp.route("/ready-for-grn", methods=["GET"])
 def get_pos_ready_for_grn():
     try:
-        # Get both approved and partially_received POs
         purchase_orders = PurchaseOrder.query.filter(
-            PurchaseOrder.status.in_(['completed'])
+            PurchaseOrder.status.in_(['approved', 'partially_received', 'completed'])
         ).order_by(PurchaseOrder.created_on.desc()).all()
         
         # Get GRN deliveries to calculate remaining quantities
@@ -151,23 +150,34 @@ def get_pos_ready_for_grn():
                     delivered_quantities[delivery.item_name] = 0
                 delivered_quantities[delivery.item_name] += delivery.quantity
             
+            # Get received quantities from Order Delivery (po.received_items)
+            od_received = {}
+            if po.received_items:
+                for rec in po.received_items:
+                    name = rec.get('item_name')
+                    od_received[name] = max(od_received.get(name, 0), float(rec.get('received_quantity', 0)))
+
             # Calculate remaining quantities for each item
             remaining_items = []
             total_remaining = 0
             for item in po.items:
                 item_name = item.get('item_name')
-                ordered_qty = item.get('quantity', 0)
-                delivered_qty = delivered_quantities.get(item_name, 0)
-                remaining_qty = max(0, ordered_qty - delivered_qty)
+                ordered_qty = float(item.get('quantity', 0))
+                delivered_qty = float(delivered_quantities.get(item_name, 0))
+                od_qty = float(od_received.get(item_name, 0))
                 
-                if remaining_qty > 0:
+                # We can only GRN what has been received in Order Delivery minus what's already GRN'd
+                waiting_for_grn = max(0, od_qty - delivered_qty)
+                
+                if waiting_for_grn > 0:
                     remaining_items.append({
                         **item,
-                        'remaining_quantity': remaining_qty,
+                        'remaining_quantity': waiting_for_grn,
                         'delivered_quantity': delivered_qty,
-                        'ordered_quantity': ordered_qty
+                        'ordered_quantity': ordered_qty,
+                        'od_received_quantity': od_qty
                     })
-                    total_remaining += remaining_qty * item.get('buy_price', 0)
+                    total_remaining += waiting_for_grn * float(item.get('buy_price', 0))
             
             po_dict['remaining_items'] = remaining_items
             po_dict['remaining_amount'] = total_remaining
@@ -303,11 +313,11 @@ def get_purchase_order_details(po_number):
         if not po:
             return jsonify({"success": False, "message": "Purchase Order not found"}), 404
         
-        # Check if PO is approved or partially received
-        if po.status not in ['completed']:
+        # Check if PO is approved, partially received or completed
+        if po.status not in ['approved', 'partially_received', 'completed']:
             return jsonify({
                 "success": False, 
-                "message": f"Purchase Order status is '{po.status}', only approved or partially received POs can be converted to GRN"
+                "message": f"Purchase Order status is '{po.status}', only approved, partially received or completed POs can be converted to GRN"
             }), 400
         
         # Get existing deliveries for this PO
@@ -320,6 +330,16 @@ def get_purchase_order_details(po_number):
                 delivered_quantities[delivery.item_name] = 0
             delivered_quantities[delivery.item_name] += delivery.quantity
         
+        # Get Order Delivery received quantities per item
+        od_received = {}
+        if po.received_items:
+            for rec in po.received_items:
+                name = rec.get('item_name')
+                od_received[name] = max(
+                    od_received.get(name, 0),
+                    float(rec.get('received_quantity', 0))
+                )
+        
         # Check if PO already has any deliveries (partial or full)
         has_deliveries = len(existing_deliveries) > 0
         is_fully_delivered = True
@@ -328,18 +348,29 @@ def get_purchase_order_details(po_number):
         enhanced_items = []
         for item in po.items:
             item_name = item.get('item_name')
-            ordered_qty = item.get('quantity', 0)
-            delivered_qty = delivered_quantities.get(item_name, 0)
-            remaining_qty = ordered_qty - delivered_qty
+            ordered_qty = float(item.get('quantity', 0))
             
-            if remaining_qty > 0:
+            # Quantity already converted to GRN
+            grn_delivered_qty = float(delivered_quantities.get(item_name, 0))
+            
+            # Quantity received in stock (Order Delivery)
+            od_received_qty = float(od_received.get(item_name, 0))
+            
+            # Available quantity to be pushed to GRN right now
+            available_for_grn = max(0, od_received_qty - grn_delivered_qty)
+            
+            # If the original PO isn't fully GRN'd
+            if ordered_qty - grn_delivered_qty > 0:
                 is_fully_delivered = False
             
             enhanced_item = {
                 **item,
                 'original_quantity': ordered_qty,
-                'delivered_quantity': delivered_qty,
-                'remaining_quantity': remaining_qty
+                'already_grned_quantity': grn_delivered_qty,
+                'od_received_quantity': od_received_qty,
+                # Set delivered_quantity so Grn.js correctly uses it as the default input limit
+                'delivered_quantity': available_for_grn,
+                'remaining_quantity': ordered_qty - grn_delivered_qty
             }
             enhanced_items.append(enhanced_item)
         
@@ -452,11 +483,11 @@ def save_grn_from_po():
         if not po:
             return jsonify({"success": False, "message": "Purchase Order not found"}), 404
         
-        # Check if PO is approved or partially received
-        if po.status not in ['completed','approved']:
+        # Check if PO is approved, partially received or completed
+        if po.status not in ['approved', 'partially_received', 'completed']:
             return jsonify({
                 "success": False, 
-                "message": f"Cannot create GRN for PO with status '{po.status}', only approved or partially received POs allowed"
+                "message": f"Cannot create GRN for PO with status '{po.status}', only approved, partially received or completed POs allowed"
             }), 400
         
         # Get existing deliveries for this PO
@@ -563,9 +594,25 @@ def save_grn_from_po():
                 "status": "active"
             })
         
-        # Update PO status based on remaining items
-        if not remaining_items:
-            # No remaining items, PO is fully delivered
+        # Update PO status based on remaining items against full ordered quantities
+        any_remaining = False
+        for item in po.items:
+            item_name = item.get('item_name')
+            ordered_qty = float(item.get('quantity', 0))
+            delivered_qty = float(existing_delivery_items.get(item_name, 0))
+            
+            new_delivery_qty = 0
+            for submitted_item in items:
+                if submitted_item.get('item_name') == item_name:
+                    new_delivery_qty = float(submitted_item.get('quantity', 0))
+                    break
+                    
+            if (delivered_qty + new_delivery_qty) < ordered_qty:
+                any_remaining = True
+                break
+                
+        if not any_remaining:
+            # No remaining items overall, PO is completely GRN'd
             po.status = 'converted_to_grn'
         else:
             # There are remaining items, PO is partially received

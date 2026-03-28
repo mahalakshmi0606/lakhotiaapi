@@ -1,0 +1,217 @@
+[
+    {
+        "po_number": "PO-202603-001",
+        "po_status": "completed",
+        "item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 230,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 1,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 575000,
+            "brand_description": "good",
+            "delivered_quantity": 1.0,
+            "remaining_quantity": 0.0,
+            "original_quantity": 1
+        },
+        "received_items": [
+            {
+                "item_name": "keerthi",
+                "item_index": 0,
+                "receipt_history": [
+                    {
+                        "date": "2026-03-27T17:15:08.172549",
+                        "type": "receive",
+                        "remarks": "",
+                        "quantity": 1.0
+                    }
+                ],
+                "ordered_quantity": 1,
+                "pending_quantity": 0.0,
+                "received_quantity": 1.0,
+                "last_received_date": "2026-03-27T17:15:08.172549"
+            }
+        ],
+        "calculated_item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 230,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 1,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 575000,
+            "brand_description": "good",
+            "delivered_quantity": 1.0,
+            "remaining_quantity": 0.0,
+            "original_quantity": 1
+        }
+    },
+    {
+        "po_number": "PO-202603-003",
+        "po_status": "completed",
+        "item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 690,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 3,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 1725000,
+            "brand_description": "good",
+            "delivered_quantity": 3.0,
+            "remaining_quantity": 0.0,
+            "original_quantity": 3
+        },
+        "received_items": [
+            {
+                "item_name": "keerthi",
+                "item_index": 0,
+                "receipt_history": [
+                    {
+                        "date": "2026-03-27T18:09:38.306207",
+                        "type": "receive",
+                        "remarks": "",
+                        "quantity": 3.0
+                    }
+                ],
+                "ordered_quantity": 3,
+                "pending_quantity": 0.0,
+                "received_quantity": 3.0,
+                "last_received_date": "2026-03-27T18:09:38.306207"
+            }
+        ],
+        "calculated_item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 690,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 3,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 1725000,
+            "brand_description": "good",
+            "delivered_quantity": 3.0,
+            "remaining_quantity": 0.0,
+            "original_quantity": 3
+        }
+    },
+    {
+        "po_number": "PO-202603-008",
+        "po_status": "approved",
+        "item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 690,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 3,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 1725000,
+            "brand_description": "good",
+            "delivered_quantity": 0,
+            "remaining_quantity": 3,
+            "original_quantity": 3
+        },
+        "received_items": [],
+        "calculated_item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 690,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 3,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 1725000,
+            "brand_description": "good",
+            "delivered_quantity": 0,
+            "remaining_quantity": 3,
+            "original_quantity": 3
+        }
+    },
+    {
+        "po_number": "PO-202603-009",
+        "po_status": "completed",
+        "item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 920,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 4,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 2300000,
+            "brand_description": "good",
+            "delivered_quantity": 3.0,
+            "remaining_quantity": 1.0,
+            "original_quantity": 4
+        },
+        "received_items": [
+            {
+                "item_name": "keerthi",
+                "item_index": 0,
+                "receipt_history": [
+                    {
+                        "date": "2026-03-28T07:42:11.285370",
+                        "type": "receive",
+                        "remarks": "",
+                        "quantity": 3.0
+                    }
+                ],
+                "ordered_quantity": 4,
+                "pending_quantity": 1.0,
+                "received_quantity": 3.0,
+                "last_received_date": "2026-03-28T07:42:11.285384"
+            }
+        ],
+        "calculated_item": {
+            "mrp": 2500,
+            "unit": "60",
+            "brand": "csk",
+            "count": 920,
+            "width": 10,
+            "length": 23,
+            "hsn_code": "98765432",
+            "quantity": 4,
+            "buy_price": 575000,
+            "item_name": "keerthi",
+            "brand_code": "987654",
+            "total_price": 2300000,
+            "brand_description": "good",
+            "delivered_quantity": 3.0,
+            "remaining_quantity": 1.0,
+            "original_quantity": 4
+        }
+    }
+]
