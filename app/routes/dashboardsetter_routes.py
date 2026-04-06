@@ -20,7 +20,7 @@ ALLOWED_EXTENSIONS = {"png", "jpg", "jpeg", "webp"}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-print("📁 Dashboard images stored at:", UPLOAD_FOLDER)
+print("Dashboard images stored at:", UPLOAD_FOLDER)
 
 # =====================================================
 # HELPERS
@@ -72,7 +72,11 @@ def get_latest_dashboard_image():
     )
 
     if not image:
-        return jsonify({"message": "No dashboard image found"}), 404
+        return jsonify({
+            "success": False,
+            "message": "No dashboard image found",
+            "image_url": None
+        }), 200
 
     return jsonify({
         "id": image.id,

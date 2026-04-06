@@ -15,7 +15,7 @@ def create_app(config_class=Config):
     app.config.from_object(config_class)
 
     # ✅ Enable CORS (allow frontend communication)
-    CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+    CORS(app, resources={r"/*": {"origins": "*"}})
 
     # ✅ Initialize extensions
     db.init_app(app)
